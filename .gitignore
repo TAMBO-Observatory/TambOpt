@@ -1,1 +1,5 @@
 /corsika_application/build
+/figures/*
+
+**/.ipynb_checkpoints/*
+**/Untitled*.ipynb
