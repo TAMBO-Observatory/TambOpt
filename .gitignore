@@ -1,5 +1,6 @@
 /corsika_application/build
 /figures/*
+fort*
 
 **/.ipynb_checkpoints/*
 **/Untitled*.ipynb
