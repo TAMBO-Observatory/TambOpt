@@ -340,9 +340,15 @@ int main(int argc, char** argv) {
 
   // build an atmosphere with Keilhauer's parametrization of the
   // US standard atmosphere into `env`
+  //create_5layer_atmosphere<EnvironmentInterface, MyExtraEnv>(
+  //    env, AtmosphereId::USStdBK, center, 1.000327, surface_, Medium::AirDry1Atm,
+  //    MagneticFieldVector{rootCS, 50_uT, 0_T, 0_T});
+  //create_5layer_atmosphere<EnvironmentInterface, MyExtraEnv>(
+  //    env, AtmosphereId::ColcaValley2022Jan, center, 1.000327, surface_, Medium::AirDry1Atm,
+  //    MagneticFieldVector{rootCS, 22.7266_uT, -2.5322_nT, -4.2859_nT});
   create_5layer_atmosphere<EnvironmentInterface, MyExtraEnv>(
       env, AtmosphereId::USStdBK, center, 1.000327, surface_, Medium::AirDry1Atm,
-      MagneticFieldVector{rootCS, 50_uT, 0_T, 0_T});
+      MagneticFieldVector{rootCS, 22.7266_uT, -2.5322_nT, -4.2859_nT});
 
   /* === END: SETUP ENVIRONMENT AND ROOT COORDINATE SYSTEM === */
 
@@ -419,15 +425,15 @@ int main(int argc, char** argv) {
   Point const showerCore{
       rootCS, 
       {
-        sin(thetaRad) * cos(phiRad) * 8000 * 1_m,
-        sin(thetaRad) * sin(phiRad) * 8000 * 1_m,
-        z0 + cos(thetaRad) * 8000 * 1_m
+        sin(thetaRad) * cos(phiRad) * 12000 * 1_m,
+        sin(thetaRad) * sin(phiRad) * 12000 * 1_m,
+        z0 + cos(thetaRad) * 12000 * 1_m
       }
   };
   Point const point1{
       rootCS,
       {
-          sin(thetaRad) * cos(phiRad) * 1 * 100 * 1_m,
+          sin(thetaRad) * cos(phiRad) * 1 * 500 * 1_m,
           sin(thetaRad) * sin(phiRad) * 1 * 500 * 1_m,
           z0 + cos(thetaRad) * 1 * 500 * 1_m
       
@@ -436,7 +442,7 @@ int main(int argc, char** argv) {
   Point const point2{
       rootCS,
       {
-          sin(thetaRad) * cos(phiRad) * 2 * 100 * 1_m,
+          sin(thetaRad) * cos(phiRad) * 2 * 500 * 1_m,
           sin(thetaRad) * sin(phiRad) * 2 * 500 * 1_m,
           z0 + cos(thetaRad) * 2 * 500 * 1_m
       
@@ -556,6 +562,78 @@ int main(int argc, char** argv) {
           sin(thetaRad) * cos(phiRad) * 15 * 500 * 1_m,
           sin(thetaRad) * sin(phiRad) * 15 * 500 * 1_m,
           z0 + cos(thetaRad) * 15 * 500 * 1_m
+      
+      }
+  };
+  Point const point16{
+      rootCS,
+      {
+          sin(thetaRad) * cos(phiRad) * 16 * 500 * 1_m,
+          sin(thetaRad) * sin(phiRad) * 16 * 500 * 1_m,
+          z0 + cos(thetaRad) * 16 * 500 * 1_m
+      
+      }
+  };
+  Point const point17{
+      rootCS,
+      {
+          sin(thetaRad) * cos(phiRad) * 17 * 500 * 1_m,
+          sin(thetaRad) * sin(phiRad) * 17 * 500 * 1_m,
+          z0 + cos(thetaRad) * 17 * 500 * 1_m
+      
+      }
+  };
+  Point const point18{
+      rootCS,
+      {
+          sin(thetaRad) * cos(phiRad) * 18 * 500 * 1_m,
+          sin(thetaRad) * sin(phiRad) * 18 * 500 * 1_m,
+          z0 + cos(thetaRad) * 18 * 500 * 1_m
+      
+      }
+  };
+  Point const point19{
+      rootCS,
+      {
+          sin(thetaRad) * cos(phiRad) * 19 * 500 * 1_m,
+          sin(thetaRad) * sin(phiRad) * 19 * 500 * 1_m,
+          z0 + cos(thetaRad) * 19 * 500 * 1_m
+      
+      }
+  };
+  Point const point20{
+      rootCS,
+      {
+          sin(thetaRad) * cos(phiRad) * 20 * 500 * 1_m,
+          sin(thetaRad) * sin(phiRad) * 20 * 500 * 1_m,
+          z0 + cos(thetaRad) * 20 * 500 * 1_m
+      
+      }
+  };
+  Point const point21{
+      rootCS,
+      {
+          sin(thetaRad) * cos(phiRad) * 21 * 500 * 1_m,
+          sin(thetaRad) * sin(phiRad) * 21 * 500 * 1_m,
+          z0 + cos(thetaRad) * 21 * 500 * 1_m
+      
+      }
+  };
+  Point const point22{
+      rootCS,
+      {
+          sin(thetaRad) * cos(phiRad) * 22 * 500 * 1_m,
+          sin(thetaRad) * sin(phiRad) * 22 * 500 * 1_m,
+          z0 + cos(thetaRad) * 22 * 500 * 1_m
+      
+      }
+  };
+  Point const point23{
+      rootCS,
+      {
+          sin(thetaRad) * cos(phiRad) * 23 * 500 * 1_m,
+          sin(thetaRad) * sin(phiRad) * 23 * 500 * 1_m,
+          z0 + cos(thetaRad) * 23 * 500 * 1_m
       
       }
   };
@@ -853,6 +931,86 @@ int main(int argc, char** argv) {
   // register ground particle output
   output.add("particles15", observationLevel15);
 
+  Plane const obsPlane16(point16, normal_vector);
+  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel16{
+      obsPlane16,
+      xaxis,
+      false, // plane should "absorb" particles
+      false  // do not print z-coordinate
+  };
+  // register ground particle output
+  output.add("particles16", observationLevel16);
+
+  Plane const obsPlane17(point17, normal_vector);
+  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel17{
+      obsPlane17,
+      xaxis,
+      false, // plane should "absorb" particles
+      false  // do not print z-coordinate
+  };
+  // register ground particle output
+  output.add("particles17", observationLevel17);
+
+  Plane const obsPlane18(point18, normal_vector);
+  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel18{
+      obsPlane18,
+      xaxis,
+      false, // plane should "absorb" particles
+      false  // do not print z-coordinate
+  };
+  // register ground particle output
+  output.add("particles18", observationLevel18);
+
+  Plane const obsPlane19(point19, normal_vector);
+  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel19{
+      obsPlane19,
+      xaxis,
+      false, // plane should "absorb" particles
+      false  // do not print z-coordinate
+  };
+  // register ground particle output
+  output.add("particles19", observationLevel19);
+
+  Plane const obsPlane20(point20, normal_vector);
+  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel20{
+      obsPlane20,
+      xaxis,
+      false, // plane should "absorb" particles
+      false  // do not print z-coordinate
+  };
+  // register ground particle output
+  output.add("particles20", observationLevel20);
+
+  Plane const obsPlane21(point21, normal_vector);
+  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel21{
+      obsPlane21,
+      xaxis,
+      false, // plane should "absorb" particles
+      false  // do not print z-coordinate
+  };
+  // register ground particle output
+  output.add("particles21", observationLevel21);
+
+  Plane const obsPlane22(point22, normal_vector);
+  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel22{
+      obsPlane22,
+      xaxis,
+      false, // plane should "absorb" particles
+      false  // do not print z-coordinate
+  };
+  // register ground particle output
+  output.add("particles22", observationLevel22);
+
+  Plane const obsPlane23(point23, normal_vector);
+  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel23{
+      obsPlane23,
+      xaxis,
+      false, // plane should "absorb" particles
+      false  // do not print z-coordinate
+  };
+  // register ground particle output
+  output.add("particles23", observationLevel23);
+
   Plane const obsPlane(showerCore, normal_vector);
   ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel{
       obsPlane,
@@ -972,18 +1130,20 @@ int main(int argc, char** argv) {
     EMThinning thinning{emthinfrac * primaryTotalEnergy, maxWeight, !multithin};
 
     // set up the stack inspector
-    StackInspector<StackType> stackInspect(10000, false, primaryTotalEnergy);
+    //StackInspector<StackType> stackInspect(100, true, primaryTotalEnergy);
+    StackInspector<StackType> stackInspect(100, false, primaryTotalEnergy);
 
     // assemble the final process sequence
     auto sequence =
         make_sequence(stackInspect, neutrinoPrimaryPythia, hadronSequence, decaySequence,
                       emCascade, prodprof, emContinuous, coreas, zhs, longprof,
                       observationLevel,
-                      observationLevel3, observationLevel2, observationLevel4, observationLevel1,
-                      //observationLevel1, observationLevel2, observationLevel3, observationLevel4,
+                      observationLevel1, observationLevel2, observationLevel3, observationLevel4,
                       observationLevel5, observationLevel6, observationLevel7, observationLevel8,
                       observationLevel9, observationLevel10, observationLevel11, observationLevel12,
-                      observationLevel13, observationLevel14, observationLevel15,
+                      observationLevel13, observationLevel14, observationLevel15, observationLevel16,
+                      observationLevel17, observationLevel18, observationLevel19, observationLevel20,
+                      observationLevel21, observationLevel22, observationLevel23,
                       inter_writer, thinning, cut);
 
     // create the cascade object using the default stack and tracking
