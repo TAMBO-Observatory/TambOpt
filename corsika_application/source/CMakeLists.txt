@@ -16,17 +16,10 @@ add_executable (c8_air_shower c8_air_shower.cpp)
 target_link_libraries (c8_air_shower PRIVATE CORSIKA8::CORSIKA8)
 CORSIKA_REGISTER_EXAMPLE (c8_air_shower)
 
-add_executable (c8_air_shower_nowrite c8_air_shower_nowrite.cpp)
-target_link_libraries (c8_air_shower_nowrite PRIVATE CORSIKA8::CORSIKA8)
-CORSIKA_REGISTER_EXAMPLE (c8_air_shower_nowrite)
-
 add_executable (c8_air_shower_original c8_air_shower_original.cpp)
 target_link_libraries (c8_air_shower_original PRIVATE CORSIKA8::CORSIKA8)
 CORSIKA_REGISTER_EXAMPLE (c8_air_shower_original)
 
-#add_executable (c8_air_shower_failed c8_air_shower_failed.cpp)
-#target_link_libraries (c8_air_shower_failed PRIVATE CORSIKA8::CORSIKA8)
-#CORSIKA_REGISTER_EXAMPLE (c8_air_shower_failed)
 if(WITH_FLUKA)
   message("compiling c8_air_shower.cpp with FLUKA")
   target_compile_definitions(c8_air_shower PRIVATE WITH_FLUKA)
