@@ -183,7 +183,7 @@ int main(int argc, char** argv) {
       ->group("Primary");
   app.add_option("-z,--zenith", "Primary zenith angle (deg)")
       ->default_val(0.)
-      ->check(CLI::Range(0., 180.))
+      ->check(CLI::Range(0., 90.))
       ->group("Primary");
   app.add_option("-a,--azimuth", "Primary azimuth angle (deg)")
       ->default_val(0.)
@@ -340,15 +340,9 @@ int main(int argc, char** argv) {
 
   // build an atmosphere with Keilhauer's parametrization of the
   // US standard atmosphere into `env`
-  //create_5layer_atmosphere<EnvironmentInterface, MyExtraEnv>(
-  //    env, AtmosphereId::USStdBK, center, 1.000327, surface_, Medium::AirDry1Atm,
-  //    MagneticFieldVector{rootCS, 50_uT, 0_T, 0_T});
-  //create_5layer_atmosphere<EnvironmentInterface, MyExtraEnv>(
-  //    env, AtmosphereId::ColcaValley2022Jan, center, 1.000327, surface_, Medium::AirDry1Atm,
-  //    MagneticFieldVector{rootCS, 22.7266_uT, -2.5322_nT, -4.2859_nT});
   create_5layer_atmosphere<EnvironmentInterface, MyExtraEnv>(
       env, AtmosphereId::USStdBK, center, 1.000327, surface_, Medium::AirDry1Atm,
-      MagneticFieldVector{rootCS, 22.7266_uT, -2.5322_nT, -4.2859_nT});
+      MagneticFieldVector{rootCS, 50_uT, 0_T, 0_T});
 
   /* === END: SETUP ENVIRONMENT AND ROOT COORDINATE SYSTEM === */
 
@@ -397,11 +391,8 @@ int main(int argc, char** argv) {
   auto const thetaRad = app["--zenith"]->as<double>() / 180. * M_PI;
   auto const phiRad = app["--azimuth"]->as<double>() / 180. * M_PI;
 
-  auto const [nx, ny, nz] = std::make_tuple(
-          sin(thetaRad) * cos(phiRad),
-          sin(thetaRad) * sin(phiRad),
-          cos(thetaRad)
-  );
+  auto const [nx, ny, nz] = std::make_tuple(sin(thetaRad) * cos(phiRad),
+                                            sin(thetaRad) * sin(phiRad), -cos(thetaRad));
   auto propDir = DirectionVector(rootCS, {nx, ny, nz});
   /* === END: CONSTRUCT PRIMARY PARTICLE === */
 
@@ -413,230 +404,13 @@ int main(int argc, char** argv) {
   auto const t = -observationHeight * cos(thetaRad) +
                  sqrt(-static_pow<2>(sin(thetaRad) * observationHeight) +
                       static_pow<2>(injectionHeight));
-  //Point const showerCore{rootCS, 0_m, 0_m, observationHeight};
-  //Point const injectionPos =
-  //    showerCore + DirectionVector{rootCS,
-  //                                 {-sin(thetaRad) * cos(phiRad),
-  //                                  -sin(thetaRad) * sin(phiRad), cos(thetaRad)}} *
-  //                     t;
-  auto const z0 = app["--injection-height"]->as<double>() * 1_m + constants::EarthRadius::Mean;
-  Point const injectionPos{rootCS, 0_m, 0_m, z0};
+  Point const showerCore{rootCS, 0_m, 0_m, observationHeight};
+  Point const injectionPos =
+      showerCore + DirectionVector{rootCS,
+                                   {-sin(thetaRad) * cos(phiRad),
+                                    -sin(thetaRad) * sin(phiRad), cos(thetaRad)}} *
+                       t;
 
-  Point const showerCore{
-      rootCS, 
-      {
-        sin(thetaRad) * cos(phiRad) * 12000 * 1_m,
-        sin(thetaRad) * sin(phiRad) * 12000 * 1_m,
-        z0 + cos(thetaRad) * 12000 * 1_m
-      }
-  };
-  Point const point1{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 1 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 1 * 500 * 1_m,
-          z0 + cos(thetaRad) * 1 * 500 * 1_m
-      
-      }
-  };
-  Point const point2{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 2 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 2 * 500 * 1_m,
-          z0 + cos(thetaRad) * 2 * 500 * 1_m
-      
-      }
-  };
-  Point const point3{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 3 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 3 * 500 * 1_m,
-          z0 + cos(thetaRad) * 3 * 500 * 1_m
-      
-      }
-  };
-  Point const point4{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 4 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 4 * 500 * 1_m,
-          z0 + cos(thetaRad) * 4 * 500 * 1_m
-      
-      }
-  };
-  Point const point5{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 5 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 5 * 500 * 1_m,
-          z0 + cos(thetaRad) * 5 * 500 * 1_m
-      
-      }
-  };
-  Point const point6{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 6 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 6 * 500 * 1_m,
-          z0 + cos(thetaRad) * 6 * 500 * 1_m
-      
-      }
-  };
-  Point const point7{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 7 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 7 * 500 * 1_m,
-          z0 + cos(thetaRad) * 7 * 500 * 1_m
-      
-      }
-  };
-  Point const point8{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 8 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 8 * 500 * 1_m,
-          z0 + cos(thetaRad) * 8 * 500 * 1_m
-      
-      }
-  };
-  Point const point9{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 9 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 9 * 500 * 1_m,
-          z0 + cos(thetaRad) * 9 * 500 * 1_m
-      
-      }
-  };
-  Point const point10{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 10 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 10 * 500 * 1_m,
-          z0 + cos(thetaRad) * 10 * 500 * 1_m
-      
-      }
-  };
-  Point const point11{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 11 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 11 * 500 * 1_m,
-          z0 + cos(thetaRad) * 11 * 500 * 1_m
-      
-      }
-  };
-  Point const point12{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 12 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 12 * 500 * 1_m,
-          z0 + cos(thetaRad) * 12 * 500 * 1_m
-      
-      }
-  };
-  Point const point13{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 13 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 13 * 500 * 1_m,
-          z0 + cos(thetaRad) * 13 * 500 * 1_m
-      
-      }
-  };
-  Point const point14{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 14 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 14 * 500 * 1_m,
-          z0 + cos(thetaRad) * 14 * 500 * 1_m
-      
-      }
-  };
-  Point const point15{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 15 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 15 * 500 * 1_m,
-          z0 + cos(thetaRad) * 15 * 500 * 1_m
-      
-      }
-  };
-  Point const point16{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 16 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 16 * 500 * 1_m,
-          z0 + cos(thetaRad) * 16 * 500 * 1_m
-      
-      }
-  };
-  Point const point17{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 17 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 17 * 500 * 1_m,
-          z0 + cos(thetaRad) * 17 * 500 * 1_m
-      
-      }
-  };
-  Point const point18{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 18 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 18 * 500 * 1_m,
-          z0 + cos(thetaRad) * 18 * 500 * 1_m
-      
-      }
-  };
-  Point const point19{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 19 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 19 * 500 * 1_m,
-          z0 + cos(thetaRad) * 19 * 500 * 1_m
-      
-      }
-  };
-  Point const point20{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 20 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 20 * 500 * 1_m,
-          z0 + cos(thetaRad) * 20 * 500 * 1_m
-      
-      }
-  };
-  Point const point21{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 21 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 21 * 500 * 1_m,
-          z0 + cos(thetaRad) * 21 * 500 * 1_m
-      
-      }
-  };
-  Point const point22{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 22 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 22 * 500 * 1_m,
-          z0 + cos(thetaRad) * 22 * 500 * 1_m
-      
-      }
-  };
-  Point const point23{
-      rootCS,
-      {
-          sin(thetaRad) * cos(phiRad) * 23 * 500 * 1_m,
-          sin(thetaRad) * sin(phiRad) * 23 * 500 * 1_m,
-          z0 + cos(thetaRad) * 23 * 500 * 1_m
-      
-      }
-  };
   // we make the axis much longer than the inj-core distance since the
   // profile will go beyond the core, depending on zenith angle
   ShowerAxis const showerAxis{injectionPos, (showerCore - injectionPos) * 1.2, env};
@@ -774,270 +548,10 @@ int main(int argc, char** argv) {
   auto hadronSequence =
       make_select(EnergySwitch(heHadronModelThreshold), leIntCounted, heCounted);
 
-  //DirectionVector const xaxis = DirectionVector(rootCS, {1.0, 0.0, 0.0});
-  DirectionVector const xaxis = DirectionVector(
-          rootCS,
-          {cos(phiRad) * cos(thetaRad), sin(phiRad) * cos(thetaRad), -sin(thetaRad)}
-  );
-  //DirectionVector const normal_vector = DirectionVector(rootCS, {0.0, 0.0, 1.0});
-  DirectionVector const normal_vector = DirectionVector(rootCS, {-nx, -ny, -nz});
   // observation plane
-  Plane const obsPlane1(point1, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel1{
-      obsPlane1,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles1", observationLevel1);
-
-  Plane const obsPlane2(point2, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel2{
-      obsPlane2,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles2", observationLevel2);
-  Plane const obsPlane3(point3, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel3{
-      obsPlane3,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles3", observationLevel3);
-
-  Plane const obsPlane4(point4, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel4{
-      obsPlane4,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles4", observationLevel4);
-
-  Plane const obsPlane5(point5, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel5{
-      obsPlane5,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles5", observationLevel5);
-
-  Plane const obsPlane6(point6, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel6{
-      obsPlane6,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles6", observationLevel6);
-
-  Plane const obsPlane7(point7, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel7{
-      obsPlane7,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles7", observationLevel7);
-
-  Plane const obsPlane8(point8, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel8{
-      obsPlane8,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles8", observationLevel8);
-
-  Plane const obsPlane9(point9, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel9{
-      obsPlane9,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles9", observationLevel9);
-
-  Plane const obsPlane10(point10, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel10{
-      obsPlane10,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles10", observationLevel10);
-
-  Plane const obsPlane11(point11, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel11{
-      obsPlane11,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles11", observationLevel11);
-
-  Plane const obsPlane12(point12, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel12{
-      obsPlane12,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles12", observationLevel12);
-
-  Plane const obsPlane13(point13, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel13{
-      obsPlane13,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles13", observationLevel13);
-
-  Plane const obsPlane14(point14, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel14{
-      obsPlane14,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles14", observationLevel14);
-
-  Plane const obsPlane15(point15, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel15{
-      obsPlane15,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles15", observationLevel15);
-
-  Plane const obsPlane16(point16, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel16{
-      obsPlane16,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles16", observationLevel16);
-
-  Plane const obsPlane17(point17, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel17{
-      obsPlane17,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles17", observationLevel17);
-
-  Plane const obsPlane18(point18, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel18{
-      obsPlane18,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles18", observationLevel18);
-
-  Plane const obsPlane19(point19, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel19{
-      obsPlane19,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles19", observationLevel19);
-
-  Plane const obsPlane20(point20, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel20{
-      obsPlane20,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles20", observationLevel20);
-
-  Plane const obsPlane21(point21, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel21{
-      obsPlane21,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles21", observationLevel21);
-
-  Plane const obsPlane22(point22, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel22{
-      obsPlane22,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles22", observationLevel22);
-
-  Plane const obsPlane23(point23, normal_vector);
-  ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel23{
-      obsPlane23,
-      xaxis,
-      false, // plane should "absorb" particles
-      1e-6 * 1_m, // padding. Should be small
-      false  // do not print z-coordinate
-  };
-  // register ground particle output
-  output.add("particles23", observationLevel23);
-
-  Plane const obsPlane(showerCore, normal_vector);
+  Plane const obsPlane(showerCore, DirectionVector(rootCS, {0., 0., 1.}));
   ObservationPlane<TrackingType, ParticleWriterParquet> observationLevel{
-      obsPlane,
-      xaxis,
+      obsPlane, DirectionVector(rootCS, {1., 0., 0.}),
       true,   // plane should "absorb" particles
       1e-6 * 1_m, // padding. Should be small
       false}; // do not print z-coordinate
@@ -1154,21 +668,13 @@ int main(int argc, char** argv) {
     EMThinning thinning{emthinfrac * primaryTotalEnergy, maxWeight, !multithin};
 
     // set up the stack inspector
-    //StackInspector<StackType> stackInspect(100, true, primaryTotalEnergy);
-    StackInspector<StackType> stackInspect(100, false, primaryTotalEnergy);
+    StackInspector<StackType> stackInspect(10000, false, primaryTotalEnergy);
 
     // assemble the final process sequence
     auto sequence =
         make_sequence(stackInspect, neutrinoPrimaryPythia, hadronSequence, decaySequence,
                       emCascade, prodprof, emContinuous, coreas, zhs, longprof,
-                      observationLevel,
-                      observationLevel1, observationLevel2, observationLevel3, observationLevel4,
-                      observationLevel5, observationLevel6, observationLevel7, observationLevel8,
-                      observationLevel9, observationLevel10, observationLevel11, observationLevel12,
-                      observationLevel13, observationLevel14, observationLevel15, observationLevel16,
-                      observationLevel17, observationLevel18, observationLevel19, observationLevel20,
-                      observationLevel21, observationLevel22, observationLevel23,
-                      inter_writer, thinning, cut);
+                      observationLevel, inter_writer, thinning, cut);
 
     // create the cascade object using the default stack and tracking
     // implementation
