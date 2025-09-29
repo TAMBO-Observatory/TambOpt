@@ -121,6 +121,7 @@ long registerRandomStreams(long seed) {
   RNGManager<>::getInstance().registerRandomStream("proposal");
   RNGManager<>::getInstance().registerRandomStream("thinning");
   RNGManager<>::getInstance().registerRandomStream("primary_particle");
+  RNGManager<>::getInstance().registerRandomStream("tauola");
   if (seed == 0) {
     std::random_device rd;
     seed = rd();
