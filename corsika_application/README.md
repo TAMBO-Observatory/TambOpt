@@ -20,8 +20,7 @@ cd build
 make clean
 make [-j8]
 cd bin
-./c8_air_shower --energy 1e7 --pdg 211 --injection-height 4000 --zenith 90 --filename ./test --force-interaction
-./c8_air_shower --energy 1e6 --injection-height 4000 --filename test1 --pdg 211 --zenith 90 --seed 1 --emcut 1 --hadcut 1 --mucut 1 --taucut 1
+./c8_air_shower --energy 1e6 --injection-height 4000 --filename test1 --pdg 211 --zenith 90 --seed 1 --emcut 0.05 --hadcut 0.05 --mucut 0.05 --taucut 0.05 --force-decay
 ```
 
 # Example submission on the Harvard cluster
