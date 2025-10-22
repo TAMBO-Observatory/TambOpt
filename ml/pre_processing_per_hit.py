@@ -118,6 +118,8 @@ for event_id in tqdm(event_dirs, desc="Processing events"):
         df["X_transformed"] = coords[0, :]
         df["Y_transformed"] = coords[1, :]
         df["Z_transformed"] = coords[2, :]
+        df["r"] = np.sqrt(df["x"]**2+df["y"]**2)
+
 
         df["injection_height"] = injection_height
         df["zenith"] = zenith
