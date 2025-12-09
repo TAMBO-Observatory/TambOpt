@@ -4,3 +4,22 @@ fort*
 
 **/.ipynb_checkpoints/*
 **/Untitled*.ipynb
+ml/processed_events_1600/*
+ml/processed_events_50k/*
+ml/training_checkpoints/*
+ml/processed_events_small/*.parquet
+training_checkpoints/*.pth
+ml/__pycache__/*
+notebooks/runs/experiment_1/*
+ml/processed_events_small_all_pdg/*
+notebooks/cone_frames/*
+notebooks/lightning_logs/*
+.idea/*
+notebooks/src/__pycache__/*
+/lightning_logs/*
+tambo_pre_processed_files_500000_simulations/*
+.vscode/*
+*.log
+*/__pycache__/*
+diffusion_model/*/*.png
+diffusion_model/*/*.npz

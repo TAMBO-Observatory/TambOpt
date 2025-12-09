@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, Subset
@@ -5,6 +6,9 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
+from visdom import Visdom
+import matplotlib.pyplot as plt
+
 
 # ============================================================
 # Dataset
@@ -23,29 +27,38 @@ class ShowerDataset(Dataset):
         if "plane" not in self.hits.columns:
             raise ValueError("Input parquet must contain a 'plane' column for 24-plane output.")
 
+        # Select relevant features
         self.feature_cols = [
             "kinetic_energy", "primary_kinetic_energy",
             "X_transformed", "Y_transformed", "Z_transformed",
-            "distance", "time_transformed",
+            "distance", # "time_transformed",
             "sin_azimuth", "cos_azimuth", "sin_zenith", "cos_zenith"
         ]
 
-        # PDG mapping
+        # PDG mapping - create map PDG number to single digit classes (0, 1, 2)
         self.pdg_map = {pdg: i for i, pdg in enumerate(pdg_classes)}
         self.inv_pdg_map = {i: pdg for pdg, i in self.pdg_map.items()}
 
+        # Map PDG to indices
         self.hits["pdg_idx"] = self.hits["pdg"].map(self.pdg_map)
 
         # ------------------------------------------------------------
         # Compute per-event, per-plane PDG counts
         # ------------------------------------------------------------
         event_plane_counts = (
+            # group data by event and plane
             self.hits.groupby(["event_id", "plane"])["pdg_idx"]
+            # count pdg indices
             .value_counts()
+            # unstack pdg indices to columns
             .unstack(fill_value=0)
+            # reindex to ensure all pdg classes are present
             .reindex(columns=range(len(pdg_classes)), fill_value=0)
         )
+        # output is events x planes x pdg_classes and number of hits
 
+        # convert to a dataframe with columns event_id, plane, count_pdg for each class
+        # rows are number of hits
         event_plane_counts.columns = [
             f"count_{self.inv_pdg_map[c]}" for c in event_plane_counts.columns
         ]
@@ -54,16 +67,24 @@ class ShowerDataset(Dataset):
         # pivot to get a flat per-event structure
         event_counts_pivot = []
         for pdg in pdg_classes:
+            # create a new column for each pdg class
             colname = f"count_{pdg}"
+            # pivot the event_plane_counts dataframe using event_id as index, plane as columns, and count_pdg as values
             pivot = event_plane_counts.pivot(
                 index="event_id", columns="plane", values=colname
             ).reindex(columns=range(n_planes), fill_value=0)
+            # rename columns to indicate plane
             pivot.columns = [f"{colname}_plane{p}" for p in pivot.columns]
+            # append to list
             event_counts_pivot.append(pivot)
 
+        # reshape to get 
+        # one column for each particle class and plane combination
+        # one row for each event
+        # one value is the count of hits
         self.event_data = pd.concat(event_counts_pivot, axis=1).fillna(0)
 
-        # Normalize event-level targets
+        # Normalize event-level targets such that the total counts per event are 1
         self.normalize_events = normalize_events
         if normalize_events:
             self.scaler = StandardScaler()
@@ -72,19 +93,27 @@ class ShowerDataset(Dataset):
         else:
             self.scaler = None
 
+        # save event ids
         self.event_ids = self.hits["event_id"].unique().tolist()
+        # save event-level columns representing <particle classes> x <planes> ids
         self.event_cols = list(self.event_data.columns)
+        # save number of planes
         self.n_planes = n_planes
 
     def __len__(self):
         return len(self.event_ids)
 
     def __getitem__(self, idx):
+        # get event id for particular index
         eid = self.event_ids[idx]
+        # filter hits for this event, this will be one row per hit
         df = self.hits[self.hits["event_id"] == eid]
 
+        # extract features from initial dataframe
         X_event = df[self.feature_cols].values.astype(float)
+        # extract per-hit PDG indices for each row
         y_pdg = df["pdg_idx"].values.astype(int)
+        # extract event-level normalized counts; <particle classes> x <planes>
         y_event = self.event_data.loc[eid].values.astype(float)
 
         return (
@@ -151,6 +180,10 @@ def train_multitask(train_dataset, val_dataset, input_dim, n_classes, n_event_ou
                     hidden_dim=128, epochs=10, batch_size=16, lr=1e-3, device="cuda",
                     lambda_event=1.0, n_planes=24):
 
+    # !!!!!! use python -m visdom.server to start server
+    viz = Visdom()
+    win = None
+
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               collate_fn=lambda x: list(zip(*x)))
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
@@ -160,6 +193,9 @@ def train_multitask(train_dataset, val_dataset, input_dim, n_classes, n_event_ou
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_pdg = nn.CrossEntropyLoss()
     loss_event = nn.MSELoss()
+
+    train_losses = []
+    val_losses = []
 
     for epoch in range(epochs):
         model.train()
@@ -184,6 +220,9 @@ def train_multitask(train_dataset, val_dataset, input_dim, n_classes, n_event_ou
             optimizer.step()
             total_loss += L_total.item()
 
+        avg_train_loss = total_loss / len(train_loader)
+        train_losses.append(avg_train_loss)
+
         # Validation
         model.eval()
         val_loss = 0.0
@@ -202,7 +241,32 @@ def train_multitask(train_dataset, val_dataset, input_dim, n_classes, n_event_ou
                 L_total = L_pdg + lambda_event * L_event
                 val_loss += L_total.item()
 
-        print(f"Epoch {epoch+1}/{epochs} | Train Loss={total_loss/len(train_loader):.4f} | Val Loss={val_loss/len(val_loader):.4f}")
+        avg_val_loss = val_loss / len(val_loader)
+        val_losses.append(avg_val_loss)
+
+        print(f"Epoch {epoch+1}/{epochs} | Train Loss={avg_train_loss:.4f} | Val Loss={avg_val_loss:.4f}")
+
+        # Visdom live plot update
+        X = np.arange(1, epoch+2)
+        Y = np.column_stack((train_losses, val_losses))
+        if win is None:
+            win = viz.line(
+                Y=Y,
+                X=X,
+                opts=dict(
+                    xlabel='Epoch',
+                    ylabel='Loss',
+                    title='Training and Validation Loss',
+                    legend=['Train Loss', 'Val Loss']
+                )
+            )
+        else:
+            viz.line(
+                Y=Y,
+                X=X,
+                win=win,
+                update='replace'
+            )
 
     return model
 
@@ -262,7 +326,7 @@ def evaluate_multitask(model, dataset, n_planes, n_event_outputs, device="cuda")
 
 if __name__ == "__main__":
     pdg_classes = [11, 13, 22]
-    hit_file = "processed_events/normalized_features.parquet"
+    hit_file = "../ml/processed_events/normalized_features_z_3.parquet"
     n_planes = 24
 
     full_dataset = ShowerDataset(hit_file, pdg_classes, n_planes=n_planes, normalize_events=True)
@@ -286,11 +350,25 @@ if __name__ == "__main__":
     n_event_outputs = len(pdg_classes)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
+    
+    
+    # model = torch.load("shower_net_multitask.pth", map_location=device) if False else None
+    model = None
+    if os.path.exists("../training_checkpoints/shower_net_multitask.pth"):
+        model = ShowerNetMultiTask(input_dim, 256, n_classes, n_event_outputs, n_planes=n_planes).to(device)
+        model.load_state_dict(torch.load("../training_checkpoints/shower_net_multitask.pth", map_location=device))
+        model.eval()
+        print("Loaded existing model from ../training_checkpoints/shower_net_multitask.pth")
 
-    model = train_multitask(train_dataset, val_dataset,
-                            input_dim, n_classes, n_event_outputs,
-                            hidden_dim=256, epochs=100, batch_size=500,
-                            lr=1e-3, device=device, lambda_event=1.0, n_planes=n_planes)
+    if model is None:
+        print("Training Multi-Task Model...")
+
+        model = train_multitask(train_dataset, val_dataset,
+                                input_dim, n_classes, n_event_outputs,
+                                hidden_dim=256, epochs=100, batch_size=500,
+                                lr=1e-3, device=device, lambda_event=1.0, n_planes=n_planes)
+
+        torch.save(model.state_dict(), "../training_checkpoints/shower_net_multitask.pth")
 
     print("\nEvaluating on Held-out Event...")
     test_metrics = evaluate_multitask(
