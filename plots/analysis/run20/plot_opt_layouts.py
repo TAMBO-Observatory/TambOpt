@@ -37,15 +37,16 @@ RUN, NSH = run_info(D, C.RUN_LOCATION)
 
 
 def shares(rd, w):
-    """{layout: [% of triggered showers within 1, 2.5, 5 deg, trigger rate %]}, drawn-count recon, all seeds and chunks
-    pooled (all_X = triggered and within X deg, as a share of all showers)."""
+    """{layout: [% of triggered showers within 1, 2.5, 5 deg, trigger rate %, New U]}, drawn-count recon, all seeds and
+    chunks pooled (all_X = triggered and within X deg, as a share of all showers; New U = u_swgo_drawn, over all)."""
     num, n = {}, {}
     for f in glob.glob(os.path.join(D, "valcnt_count_s*_*.json")):
         for k, by in json.load(open(f))["scores"].items():
             r = by[rd][w]
-            num[k] = num.get(k, 0.0) + r["n_showers"] * np.array([r["all_1"], r["all_2.5"], r["all_5"], r["triggered"]])
+            num[k] = num.get(k, 0.0) + r["n_showers"] * np.array([r["all_1"], r["all_2.5"], r["all_5"], r["triggered"],
+                                                                   r["u_swgo_drawn"]])
             n[k] = n.get(k, 0.0) + r["n_showers"]
-    return {k: np.r_[100 * v[:3] / v[3], 100 * v[3] / n[k]] for k, v in num.items()}
+    return {k: np.r_[100 * v[:3] / v[3], 100 * v[3] / n[k], v[4] / n[k]] for k, v in num.items()}
 
 
 m = load_tr_mountain(C.GEOMETRY_PATH_RESOLVED, C.GEOMETRY_GROUP, C.DET_KEY, east_entry=C.EAST_ENTRY,
@@ -65,9 +66,11 @@ for key, _ in panels:
 
 mark = lambda s: r"$\colorbox{#f8c4c4}{\textbf{" + s + "}}$"                                # noqa: E731
 md = [f"## {RUN} layouts — triggered showers within 1° / 2.5° / 5° [%], drawn-count recon", "",
-      f"{NSH:,} held-out showers, 5 count seeds pooled. Angles = share of triggered showers; Trig = share of all "
-      "showers that trigger (≥ 3 read-out detectors with a drawn particle, background muons included). Cable = 3-D "
-      "minimum-spanning-tree length. Red = best in the column."]
+      f"{NSH:,} held-out showers, 5 count seeds pooled. 1° / 2.5° / 5° = share of TRIGGERED showers within that angle; "
+      "Trig = share of ALL showers that trigger (≥ 3 read-out detectors with a drawn particle, background muons "
+      "included); New U = mean[trig · (g_a + 0.3(1−g_a)q_a)] over ALL showers (with background it also counts "
+      "background-only triggers, see the Ghost column of validation_compact). Cable = 3-D minimum-spanning-tree "
+      "length. Red = best in the column."]
 ncol = 5
 nrow = -(-len(panels) // ncol)
 xl = (tri[..., 0].min() - 60, tri[..., 0].max() + 60)
@@ -103,15 +106,15 @@ for tag, w, title in NOISE:
     plt.close(fig)
     print("[write]", out)
 
-    rows = [[name, f"{geo[key][3]:.2f}"] + [f"{v:.1f}" for v in (*allr[key][[3, 0, 1, 2]], *knn[key][[3, 0, 1, 2]])]
-            for key, name in panels]
-    for c in range(2, 10):                                       # best per metric column
+    rows = [[name, f"{geo[key][3]:.2f}"] + [f"{v:.1f}" for v in allr[key][[3, 0, 1, 2]]] + [f"{allr[key][4]:.3f}"]
+            + [f"{v:.1f}" for v in knn[key][[3, 0, 1, 2]]] + [f"{knn[key][4]:.3f}"] for key, name in panels]
+    for c in range(2, 12):                                       # best per metric column
         best = max(float(r[c]) for r in rows)
         for r in rows:
             r[c] = mark(r[c]) if float(r[c]) == best else r[c]
     md += ["", f"### {title}", "",
-           "| Layout | Cable [km] | All read out: Trig | 1° | 2.5° | 5° | kNN gate: Trig | 1° | 2.5° | 5° |",
-           "|---|---|---|---|---|---|---|---|---|---|"] + ["| " + " | ".join(r) + " |" for r in rows]
+           "| Layout | Cable [km] | All read out: Trig | 1° | 2.5° | 5° | New U | kNN gate: Trig | 1° | 2.5° | 5° | New U |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|"] + ["| " + " | ".join(r) + " |" for r in rows]
 out = os.path.join(OUTD, "opt_layouts_tables_notion.md")
 open(out, "w").write("\n".join(md) + "\n")
 print("\n".join(md))
