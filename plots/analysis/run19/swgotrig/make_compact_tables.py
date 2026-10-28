@@ -153,18 +153,18 @@ for title, rd, w in CONDS:
     L += emit(rows, c0, low=(c0 + 3, c0 + 4))
 
 L += ["", "### 2. Robustness to background — share of the no-background value kept [%]", "",
-      "5° of triggered with background / without, same readout; 100 = unaffected. "
+      "1° / 2.5° / 5° of triggered with background / without, same readout; 100 = unaffected. "
       + ("A share of a low baseline: the dropout recon keeps more, but its absolute value stays below the others "
          "(table 1). " if 1 in SEL else "") + "New U is left out: with "
       "background it rises because background-only triggers add showers (see the Ghost column), not because the "
       "reconstruction improves."]
 for title, rd in (("All read out", "none"), ("kNN gate", "knn")):
-    L.append(f"\n**{title}**\n\n| Layout | 1 µs | 10 µs |\n|---|---|---|")
+    L.append(f"\n**{title}**\n\n| Layout | 1 µs: 1° | 2.5° | 5° | 10 µs: 1° | 2.5° | 5° |\n|---|---|---|---|---|---|---|")
     rows = []
     for k, name in LAYOUTS:
         v = {w: [trig_vals(S, k, rd, w) for S in cnt] for w in ("0", "1000", "10000")}
-        keep = lambda w: [x[2] / max(y[2], 1e-12) for x, y in zip(v[w], v["0"])]  # noqa: E731
-        rows.append([name] + [cell(keep(w), lambda r: f"{100 * r:.0f}") for w in ("1000", "10000")])
+        keep = lambda w, i: [x[i] / max(y[i], 1e-12) for x, y in zip(v[w], v["0"])]  # noqa: E731
+        rows.append([name] + [cell(keep(w, i), lambda r: f"{100 * r:.0f}") for w in ("1000", "10000") for i in range(3)])
     L += emit(rows, 1)
 
 names = [n for n in ghost["recon_dirs"]
