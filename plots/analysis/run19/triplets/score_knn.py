@@ -46,6 +46,7 @@ ap.add_argument("--out", default=None, help="default knn_scores.json, or knn_sco
 ap.add_argument("--counting", choices=("none", "poisson"), default="none")
 ap.add_argument("--eps-gamma", type=float, default=EPS_GAMMA, help="photon detection probability (counting only)")
 ap.add_argument("--count-seed", type=int, default=7)
+ap.add_argument("--kernel-chunk", type=int, default=64, help="showers per kernel pass (GPU memory only; 16 fits a 20 GB MIG slice)")
 ap.add_argument("--mu-min", type=float, default=1.0, help="expected-count trigger: a detector counts if mu >= this")
 ap.add_argument("--k-min", type=int, default=3, help="expected-count trigger: >= this many such read-out detectors")
 ap.add_argument("--layouts", default=None, help="name=path.pt lines instead of the default triplet / grid / disk set")
@@ -76,7 +77,7 @@ def near_centre(pos, dirs):
 clouds, B, _, prim = load_events(args.n_events, dev, m, select=near_centre if args.axis_within > 0 else None,
                                  start=args.event_start)
 ct = CountingTransform(surface, None, mode="poisson" if args.counting == "poisson" else "expected", eps_gamma=args.eps_gamma)
-kern = DCS.GS.CachedKernel(clouds, surface, dev, chunk=64, expected_primary=prim, species_transform=ct)
+kern = DCS.GS.CachedKernel(clouds, surface, dev, chunk=args.kernel_chunk, expected_primary=prim, species_transform=ct)
 E_true, th_t, ph_t = primary_to_physical_labels(prim)
 T_FALLBACK = None
 

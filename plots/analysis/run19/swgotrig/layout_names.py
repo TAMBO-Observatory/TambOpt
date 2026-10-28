@@ -39,6 +39,19 @@ def label(key, short=False):
     return key
 
 
+def run_info(d, run_location):
+    """('Run <N>', held-out showers scored): N from the run folder name, the showers summed over the seed-1 chunks of
+    validate_count (the first layout, no background, all read out)."""
+    import glob
+    import json
+    n = 0
+    for f in glob.glob(os.path.join(d, "validate_count_s1_*.json")):
+        s = json.load(open(f))["scores"]
+        n += int(s[next(iter(s))]["none"]["0"]["n_showers"])
+    m = re.match(r"(\d+)_", os.path.basename(run_location.rstrip("/")))
+    return (f"Run {int(m.group(1))}" if m else os.path.basename(run_location)), n
+
+
 def layouts(d, short=False):
     """[(key, label)]: the baselines, then the optimised layouts, each in the order of
     <d>/validate_count_layouts.txt."""

@@ -25,10 +25,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.d
 sys.path.insert(0, REPO)
 import modules.constants as C  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from layout_names import layouts  # noqa: E402
+from layout_names import layouts, run_info  # noqa: E402
 
 D = os.path.join(C.RUN_LOCATION, "diagnostics", "swgotrig")
 LAYOUTS = layouts(D, short=True)                                 # validate_count_layouts.txt order
+RUN, NSH = run_info(D, C.RUN_LOCATION)                     # "Run <N>", held-out showers scored
 CONDS = [("No background, all read out", "none", "0"), ("No background, kNN gate", "knn", "0"),
          ("1 µs background, all read out", "none", "1000"), ("1 µs background, kNN gate", "knn", "1000"),
          ("10 µs background, all read out", "none", "10000"), ("10 µs background, kNN gate", "knn", "10000")]
@@ -126,8 +127,8 @@ cnt = [seeds(RECONS[i][1]) for i in SEL]
 WHO = " / ".join(RECONS[i][0] for i in SEL)
 ghost = json.load(open(os.path.join(D, "ghost_scores.json")))
 G = ghost["scores"]
-L = ["## Run 19 recon comparison — " + " / ".join(RECONS[i][2] for i in SEL), "",
-     "21,060 held-out showers. " + (f"Every cell is **{WHO}** ({'red' if A.notion else 'bold'} = best). " if len(SEL) > 1 else
+L = [f"## {RUN} recon comparison — " + " / ".join(RECONS[i][2] for i in SEL), "",
+     f"{NSH:,} held-out showers. " + (f"Every cell is **{WHO}** ({'red' if A.notion else 'bold'} = best). " if len(SEL) > 1 else
                                     f"{'Red' if A.notion else 'Bold'} = best layout in the column. ") + "Triggered = ≥ 3 read-out "
      "detectors with a drawn particle (background muons count too). Old U = mean[g + 0.3(1−g)q] (angle and energy, "
      "no trigger); New U = mean[trig · (g_a + 0.3(1−g_a)q_a)] (angle only, drawn trigger); both over all showers. "
@@ -154,7 +155,7 @@ for title, rd, w in CONDS:
 L += ["", "### 2. Robustness to background — share of the no-background value kept [%]", "",
       "5° of triggered with background / without, same readout; 100 = unaffected. "
       + ("A share of a low baseline: the dropout recon keeps more, but its absolute value stays below the others "
-         "(table 1). " if len(SEL) > 1 else "") + "New U is left out: with "
+         "(table 1). " if 1 in SEL else "") + "New U is left out: with "
       "background it rises because background-only triggers add showers (see the Ghost column), not because the "
       "reconstruction improves."]
 for title, rd in (("All read out", "none"), ("kNN gate", "knn")):
