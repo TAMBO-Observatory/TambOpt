@@ -34,6 +34,7 @@ OUTD = os.path.join(C.RUN_LOCATION, "diagnostics")
 PATHS = dict(l.strip().split("=", 1) for l in open(os.path.join(D, "validate_count_layouts.txt")) if "=" in l)
 NOISE = [("nobg", "0", "No background"), ("1us", "1000", "1 µs background"), ("10us", "10000", "10 µs background")]
 RUN, NSH = run_info(D, C.RUN_LOCATION)
+GH = json.load(open(os.path.join(D, "ghost_scores.json")))["scores"]      # background-only windows
 
 
 def shares(rd, w):
@@ -69,7 +70,7 @@ md = [f"## {RUN} layouts — triggered showers within 1° / 2.5° / 5° [%], dra
       f"{NSH:,} held-out showers, 5 count seeds pooled. 1° / 2.5° / 5° = share of TRIGGERED showers within that angle; "
       "Trig = share of ALL showers that trigger (≥ 3 read-out detectors with a drawn particle, background muons "
       "included); New U = mean[trig · (g_a + 0.3(1−g_a)q_a)] over ALL showers (with background it also counts "
-      "background-only triggers, see the Ghost column of validation_compact). Cable = 3-D minimum-spanning-tree "
+      "background-only triggers). Ghost = share of background-only windows that trigger (same trigger, lower is better). Cable = 3-D minimum-spanning-tree "
       "length. Red = best in the column."]
 ncol = 5
 nrow = -(-len(panels) // ncol)
@@ -106,15 +107,23 @@ for tag, w, title in NOISE:
     plt.close(fig)
     print("[write]", out)
 
-    rows = [[name, f"{geo[key][3]:.2f}"] + [f"{v:.1f}" for v in allr[key][[3, 0, 1, 2]]] + [f"{allr[key][4]:.3f}"]
-            + [f"{v:.1f}" for v in knn[key][[3, 0, 1, 2]]] + [f"{knn[key][4]:.3f}"] for key, name in panels]
-    for c in range(2, 12):                                       # best per metric column
-        best = max(float(r[c]) for r in rows)
+    bg = w != "0"                                               # ghosts only exist with background
+
+    def block(sh, rd, key):
+        """Trig, (Ghost), 1 / 2.5 / 5 deg of triggered, New U for one readout."""
+        g = [f"{100 * GH[key][rd][w]['ghost_trig']:.1f}"] if bg else []
+        return [f"{sh[key][3]:.1f}"] + g + [f"{v:.1f}" for v in sh[key][:3]] + [f"{sh[key][4]:.3f}"]
+    rows = [[name, f"{geo[key][3]:.2f}"] + block(allr, "none", key) + block(knn, "knn", key) for key, name in panels]
+    per = 6 if bg else 5
+    for c in range(2, len(rows[0])):                             # best per metric column (ghosts: lowest)
+        low = bg and (c - 2) % per == 1
+        best = (min if low else max)(float(r[c]) for r in rows)
         for r in rows:
             r[c] = mark(r[c]) if float(r[c]) == best else r[c]
+    head = ["Trig"] + (["Ghost"] if bg else []) + ["1°", "2.5°", "5°", "New U"]
     md += ["", f"### {title}", "",
-           "| Layout | Cable [km] | All read out: Trig | 1° | 2.5° | 5° | New U | kNN gate: Trig | 1° | 2.5° | 5° | New U |",
-           "|---|---|---|---|---|---|---|---|---|---|---|---|"] + ["| " + " | ".join(r) + " |" for r in rows]
+           "| Layout | Cable [km] | All read out: " + " | ".join(head) + " | kNN gate: " + " | ".join(head) + " |",
+           "|---" * (2 + 2 * len(head)) + "|"] + ["| " + " | ".join(r) + " |" for r in rows]
 out = os.path.join(OUTD, "opt_layouts_tables_notion.md")
 open(out, "w").write("\n".join(md) + "\n")
 print("\n".join(md))
