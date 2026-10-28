@@ -1,6 +1,6 @@
 """Run 20 (Malata): the Stage 4 training curves of the swgo_trigger runs (optimize_log.json), one colour per run.
 Panels: the utility on each step's fresh batch (without the cable penalty; 100-step running mean, raw steps faint),
-the utility on the fixed scoring set every 250 steps (what picks the best layout; cable runs: minus the penalty, as
+the same with the cable penalty subtracted (what Adam maximised), the utility on the fixed scoring set every 250 steps (what picks the best layout; cable runs: minus the penalty, as
 optimised), and the 3-D cable length of the cable runs (logged every step).
 Writes <run 20>/diagnostics/opt_training.png.
 
@@ -38,7 +38,7 @@ def smooth(v):
     return np.r_[np.full(W - 1, np.nan), out]
 
 
-fig, axs = plt.subplots(1, 3, figsize=(17, 5.2), constrained_layout=True)
+fig, axs = plt.subplots(1, 4, figsize=(22, 5.2), constrained_layout=True)
 for sfx, name, col, ls in RUNS:
     f = os.path.join(PRE + sfx, "optimize_log.json")
     if not os.path.exists(f):
@@ -50,23 +50,29 @@ for sfx, name, col, ls in RUNS:
     u = np.array([r.get("U_util", r["U"]) for r in log])
     axs[0].plot(ep, u, color=col, lw=0.3, alpha=0.15)
     axs[0].plot(ep, smooth(u), color=col, ls=ls, lw=1.6, label=name)
+    ut = np.array([r["U"] for r in log])                         # as optimised (cable runs: minus the penalty)
+    axs[1].plot(ep, ut, color=col, lw=0.3, alpha=0.15)
+    axs[1].plot(ep, smooth(ut), color=col, ls=ls, lw=1.6, label=name)
     sc = j["score_log"]
-    axs[1].plot([s["epoch"] for s in sc], [s["U_score"] for s in sc], color=col, ls=ls, lw=1.6, marker="o", ms=3,
+    axs[2].plot([s["epoch"] for s in sc], [s["U_score"] for s in sc], color=col, ls=ls, lw=1.6, marker="o", ms=3,
                 label=name)
     if "cable_km" in log[0]:
-        axs[2].plot(ep, [r["cable_km"] for r in log], color=col, ls=ls, lw=1.6, label=name)
+        axs[3].plot(ep, [r["cable_km"] for r in log], color=col, ls=ls, lw=1.6, label=name)
     print(f"{name}: {len(log)} steps, U_util last-100 mean {np.nanmean(u[-W:]):.3f}, best scoring U {j['best_u']:.3f}")
 
-axs[0].set_title(f"Utility on each step's batch (no cable penalty), {W}-step mean", fontsize=10.5)
+axs[0].set_title(f"Training set: utility on each step's batch, no cable penalty ({W}-step mean)", fontsize=10)
 axs[0].set_ylabel("U (30 × mean reward)")
-axs[1].set_title("Utility on the fixed scoring set (cable runs: minus the penalty)", fontsize=10.5)
-axs[1].set_ylabel("U on the scoring set")
-axs[1].set_ylim(15, 29)                    # the centre-start cable run starts at about -450 (detectors closer than d_min)
-axs[1].text(60, 15.4, "centre start + cable: step 0 off scale (spacing penalty)", fontsize=8, color="#666666")
-axs[2].set_title("3-D cable length (cable runs)", fontsize=10.5)
-axs[2].set_ylabel("Cable [km]")
-axs[2].axhline(9.30, color="#999999", lw=0.8, ls=":")
-axs[2].text(50, 9.35, "grid 9.30 km", fontsize=8, color="#666666")
+axs[1].set_title(f"Training set: utility as optimised, cable runs minus the penalty ({W}-step mean)", fontsize=10)
+axs[1].set_ylabel("U on the training batches")
+axs[2].set_title("Scoring set (fixed 1,024 showers): utility as optimised", fontsize=10)
+axs[2].set_ylabel("U on the scoring set")
+for ax in axs[1:3]:
+    ax.set_ylim(15, 29)                    # the centre-start cable run starts far below (detectors closer than d_min)
+axs[2].text(60, 15.4, "centre start + cable: step 0 off scale (spacing penalty)", fontsize=8, color="#666666")
+axs[3].set_title("3-D cable length (cable runs)", fontsize=10)
+axs[3].set_ylabel("Cable [km]")
+axs[3].axhline(9.30, color="#999999", lw=0.8, ls=":")
+axs[3].text(50, 9.35, "grid 9.30 km", fontsize=8, color="#666666")
 for ax in axs:
     ax.set_xlabel("Adam step")
     ax.grid(alpha=0.25, lw=0.5)
