@@ -9,7 +9,10 @@ OPT = {"opt_a2_grid": "Opt. Poisson 2 m², grid start", "opt_a2_center": "Opt. P
        "opt_a20_grid": "Opt. Poisson 20 m², grid start",
        "opt_a2_step_grid_5000": "Opt. step 2 m², grid start (5,000 steps)",
        "opt_a2_step_grid_8000": "Opt. step 2 m², grid start (8,000 steps)",
-       "opt_a2_step_grid": "Opt. step 2 m², grid start", "opt_a2_step_center": "Opt. step 2 m², centre start"}
+       "opt_a2_step_grid": "Opt. step 2 m², grid start", "opt_a2_step_center": "Opt. step 2 m², centre start",
+       "opt20b_1deg_poisson": "Opt. 1° under 10 µs bg, Poisson, grid start",
+       "opt20b_1deg_step": "Opt. 1° under 10 µs bg, step, grid start",
+       "opt20b_oldu": "Opt. Old U under 10 µs bg, grid start"}
 
 
 def _metres(v):
