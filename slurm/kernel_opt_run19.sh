@@ -107,5 +107,7 @@ python -u scripts/04_optimize_lbfgs_kernel.py --init "$INIT" \
     ${PLATEAU:+--plateau-every ${PLATEAU_EVERY:-25} --plateau-min-frac ${PLATEAU_MIN_FRAC:-0.0333333}} \
     --ckpt-every "${CKPT_EVERY:-250}"
 rc=$?
+# CHAIN=1 (run20b_submit.sh): the continuation jobs share this job's name; once the run has finished they are not needed
+[ "$rc" = 0 ] && [ -n "$CHAIN" ] && scancel --state=PENDING -u "$USER" -n "$SLURM_JOB_NAME"
 notify_end $rc
 exit $rc
