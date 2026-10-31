@@ -341,6 +341,7 @@ def run_main_pool(args, mountain, surface, recon, out_dir, resp=None):
     print(f"[pool] scoring set loaded ({score_set[2].shape[0]} events) in {time.time() - t0:.0f}s")
 
     e_init, n_init = init_layout(mountain, args.init, DEVICE, args.n_det)
+    args.n_det = len(e_init)                      # a layout file sets the detector count
     xy_module = LearnableXY(e_init, n_init, device=str(DEVICE)).to(DEVICE)
     # --optim sgd: plain gradient ascent; the step is proportional to the gradient, so a gradient that is mostly noise
     # (averaging out over steps) moves little, where Adam moves every detector by ~lr per step whatever the direction.
@@ -634,16 +635,21 @@ def load_recon(recon_dir, device):
 
 
 def init_layout(mountain, scheme, device, n_det=N_DETECTORS):
-    e, n = sample_initial_layout_ne(mountain, n_units=n_det, scheme=scheme)
-    e = torch.as_tensor(e, dtype=torch.float32)
-    n = torch.as_tensor(n, dtype=torch.float32)
+    """grid / center, or a layout file (.pt with x, y; its own detector count)"""
+    if scheme.endswith(".pt"):
+        lay = torch.load(scheme, map_location="cpu")
+        e, n = lay["x"].float(), lay["y"].float()
+    else:
+        e, n = sample_initial_layout_ne(mountain, n_units=n_det, scheme=scheme)
+        e = torch.as_tensor(e, dtype=torch.float32)
+        n = torch.as_tensor(n, dtype=torch.float32)
     e, n = project_to_mountain_ne(mountain, e, n)
     return e.to(device), n.to(device)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--init", choices=("grid", "center"), default="center")
+    ap.add_argument("--init", default="center", help="grid, center or a layout file (.pt with x, y)")
     ap.add_argument("--n-det", type=int, default=N_DETECTORS,
                     help="detectors in the layout; the DeepSets recon takes any count")
     ap.add_argument("--epochs", type=int, default=200, help="Adam steps")

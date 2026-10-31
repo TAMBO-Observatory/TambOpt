@@ -1,0 +1,99 @@
+"""Run 20 SGD tests (slurm/run20_sgd_test.sh): the layout of each run at its latest checkpoint (opt_state.pt), against the
+grid start, on the detector region. Rows: Poisson trigger, step trigger; columns: no background lr 0.3 / 1 / 3 m, 1 us +
+kNN gate lr 1 m. Each panel: grid start (grey rings), current positions, the move of each detector, and the scoring-set U
+(grid, best, latest). The detector region is drawn flat (light grey faces). --set sparse: the step-trigger runs of run20_sgd_sparse_test.sh (rows: 20-detector grid start,
+33 triplets of 25 m start; columns lr 1 / 3 m), with the median distance to the nearest and second-nearest detector.
+Writes <run 20>/diagnostics/r20b/sgd_layouts[_sparse].png.
+
+    source slurm/run20_guard.sh; python plots/analysis/run20/plot_sgd_layouts.py [--set sparse]
+"""
+import argparse
+import os
+import sys
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+from matplotlib.collections import LineCollection, PolyCollection  # noqa: E402
+
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, REPO)
+import modules.constants as C  # noqa: E402
+from modules.geometry import load_tr_mountain, sample_initial_layout_ne  # noqa: E402
+from modules.geometry.mountain import _read_detector_region, _ecef_to_enu  # noqa: E402
+
+PRE = os.path.join(C.RUN_LOCATION, "test_v6_run_04_optimize_lbfgs_kernel_sgdtest_")
+ap = argparse.ArgumentParser()
+ap.add_argument("--set", choices=("grid", "sparse"), default="grid")
+SET = ap.parse_args().set
+TRI = os.path.join(C.RUN_LOCATION, "diagnostics", "triplets", "layouts", "tri33_r25_n99.pt")
+if SET == "grid":       # (folder prefix, row name, colour, start: detector count or layout file)
+    ROWS = [("", "Poisson trigger", "#2a6fb0", 100), ("step_", "step trigger", "#e07b39", 100)]
+    COLS = [("nobg_lr0p3", "no bg, lr 0.3 m"), ("nobg_lr1", "no bg, lr 1 m"), ("nobg_lr3", "no bg, lr 3 m"),
+            ("1us_lr1", "1 µs + kNN, lr 1 m")]
+else:
+    ROWS = [("step_n20_", "20-det. grid start", "#2a6fb0", 20), ("step_tri25_", "triplets 25 m start", "#e07b39", TRI)]
+    COLS = [("lr1", "lr 1 m"), ("lr3", "lr 3 m")]
+
+
+def nn12(x, y):
+    d = np.hypot(x[:, None] - x[None], y[:, None] - y[None])
+    np.fill_diagonal(d, np.inf)
+    d = np.sort(d, 1)
+    return np.median(d[:, 0]), np.median(d[:, 1])
+
+m = load_tr_mountain(C.GEOMETRY_PATH_RESOLVED, C.GEOMETRY_GROUP, C.DET_KEY, east_entry=C.EAST_ENTRY,
+                     layer_east_dx=C.LAYER_EAST_DX, n_planes=C.N_PLANES)
+verts, faces, det_idx, loc = _read_detector_region(C.GEOMETRY_PATH_RESOLVED, C.GEOMETRY_GROUP, C.DET_KEY)
+tri = np.stack([_ecef_to_enu(verts[:, faces[k, det_idx]], loc[0], loc[1]).T for k in range(3)], 1)
+
+
+def start(spec):
+    if isinstance(spec, str):
+        lay = torch.load(spec, map_location="cpu")
+        return lay["x"].float().numpy(), lay["y"].float().numpy()
+    return tuple(np.asarray(v, float) for v in sample_initial_layout_ne(m, n_units=spec, scheme="grid"))
+
+fig, axs = plt.subplots(len(ROWS), len(COLS), figsize=(4.6 * len(COLS), 5.6 * len(ROWS)), constrained_layout=True,
+                        squeeze=False)
+for r, (pre, rname, col, spec) in enumerate(ROWS):
+    e0, n0 = start(spec)
+    for c, (key, cname) in enumerate(COLS):
+        ax = axs[r, c]
+        ax.add_collection(PolyCollection(tri[:, :, :2], facecolors="#f2f2f2", edgecolors="#d0d0d0",
+                                         linewidths=0.3))
+        ax.set_xlim(tri[..., 0].min() - 60, tri[..., 0].max() + 60)
+        ax.set_ylim(tri[..., 1].min() - 60, tri[..., 1].max() + 60)
+        ax.set_aspect("equal")
+        ax.tick_params(labelsize=7)
+        f = os.path.join(PRE + pre + key, "opt_state.pt")
+        if not os.path.exists(f):
+            ax.set_title(f"{rname}, {cname}\n(no checkpoint)", fontsize=9)
+            continue
+        st = torch.load(f, map_location="cpu", weights_only=False)
+        x, y = st["xy"]["x"].float().numpy(), st["xy"]["y"].float().numpy()
+        sc = st["score_log"]
+        mv = np.hypot(x - e0, y - n0)
+        ax.scatter(e0, n0, s=14, facecolors="none", edgecolors="#8a8a8a", lw=0.8, label="start")
+        ax.add_collection(LineCollection(np.stack([np.c_[e0, n0], np.c_[x, y]], 1), colors=col, linewidths=0.8))
+        ax.scatter(x, y, s=10, color=col, lw=0, zorder=3, label=f"step {st['epoch']}")
+        u0, ul = sc[0]["U_score"], sc[-1]["U_score"]
+        ax.set_title(f"{rname}, {cname}\nscoring U: grid {u0:.2f}, best {st['best_u']:.2f}, "
+                     f"step {sc[-1]['epoch']} {ul:.2f} ({100 * (ul / u0 - 1):+.1f}%)\n"
+                     f"move: median {np.median(mv):.1f} m, max {mv.max():.0f} m"
+                     + ("\nnearest / 2nd nearest: {:.0f} / {:.0f} m -> {:.0f} / {:.0f} m".format(*nn12(e0, n0), *nn12(x, y))
+                        if SET == "sparse" else ""), fontsize=8.5)
+        ax.legend(fontsize=7, frameon=False, loc="lower left")
+        for s in ("top", "right"):
+            ax.spines[s].set_visible(False)
+for ax in axs[:, 0]:
+    ax.set_ylabel("North [m]")
+for ax in axs[-1]:
+    ax.set_xlabel("East [m]")
+fig.suptitle("Run 20 SGD tests: layouts at the latest checkpoint" + ("\n" if SET == "sparse" else " ") + "(1° utility, default recon, expected counts, "
+             "4 × 2,048 showers per step" + (", step trigger, no background)" if SET == "sparse" else ")"), fontsize=12)
+out = os.path.join(C.RUN_LOCATION, "diagnostics", "r20b", "sgd_layouts" + ("_sparse" if SET == "sparse" else "") + ".png")
+fig.savefig(out, dpi=170, facecolor="white")
+print("[write]", out)
