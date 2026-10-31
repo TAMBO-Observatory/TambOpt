@@ -2,10 +2,12 @@
 Panels: the utility on each step's fresh batch (without the cable penalty; 100-step running mean, raw steps faint),
 the same with the cable penalty subtracted (what Adam maximised), the utility on the fixed scoring set every 250 steps (what picks the best layout; cable runs: minus the penalty, as
 optimised), and the 3-D cable length of the cable runs (logged every step). --set 20b: the run 20b runs (1 deg under
-10 us background, 8 x 2,048 showers per step) with the adaptive step size in the last panel instead of the cable.
-Writes <run 20>/diagnostics/opt_training[_20b].png.
+10 us background, 8 x 2,048 showers per step) with the adaptive step size in the last panel instead of the cable;
+--set 20c: the run 20c runs (1 deg, default recon, expected counts, no background / 1 us + kNN gate). A run without
+optimize_log.json (stopped at a time limit) is read from its opt_state.pt.
+Writes <run 20>/diagnostics/opt_training[_20b|_20c].png.
 
-    source slurm/run20_guard.sh; python plots/analysis/run20/plot_opt_training.py [--set 20b]
+    source slurm/run20_guard.sh; python plots/analysis/run20/plot_opt_training.py [--set 20b|20c]
 """
 import argparse
 import glob
@@ -24,7 +26,7 @@ import modules.constants as C  # noqa: E402
 
 PRE = os.path.join(C.RUN_LOCATION, "test_v6_run_04_optimize_lbfgs_kernel_swgotrig_l0p3_k3_")
 ap = argparse.ArgumentParser()
-ap.add_argument("--set", choices=("20", "20b"), default="20")
+ap.add_argument("--set", choices=("20", "20b", "20c"), default="20")
 SET = ap.parse_args().set
 RUNS = [("a2_lr10_grid_b2048", "Opt. Poisson, grid", "#2a6fb0", "-"),
         ("a2_lr10_center_b2048", "Opt. Poisson, centre", "#2a6fb0", "--"),
@@ -40,6 +42,9 @@ if SET == "20b":                          # folder patterns (the lr is part of t
     RUNS = [("a2_th1_gtrig" + T, "1° under 10 µs bg, Poisson", "#2a6fb0", "-"),
             ("a2_step_th1_gtrig" + T, "1° under 10 µs bg, step", "#6b6b6b", "-"),
             ("a2_E_notrig" + T, "Old U under 10 µs bg", "#e07b39", "-")]
+if SET == "20c":
+    RUNS = [("a2_th1_lr*_grid_b2048_acc8_plat", "1°, no background", "#2a6fb0", "-"),
+            ("a2_th1_gtrig_lr*_grid_b2048_bg1us_knn23_acc16_plat", "1°, 1 µs bg + kNN gate", "#e07b39", "-")]
 W = 100
 
 
@@ -51,11 +56,16 @@ def smooth(v):
 
 fig, axs = plt.subplots(1, 4, figsize=(22, 5.2), constrained_layout=True)
 for sfx, name, col, ls in RUNS:
-    f = next(iter(sorted(glob.glob(os.path.join(PRE + sfx, "optimize_log.json")))), "")
-    if not os.path.exists(f):
-        print("[skip]", f)
+    d = next(iter(sorted(glob.glob(PRE + sfx))), "")
+    f = os.path.join(d, "optimize_log.json")
+    if os.path.exists(f):
+        j = json.load(open(f))
+    elif os.path.exists(os.path.join(d, "opt_state.pt")):
+        import torch
+        j = torch.load(os.path.join(d, "opt_state.pt"), map_location="cpu", weights_only=False)
+    else:
+        print("[skip]", PRE + sfx)
         continue
-    j = json.load(open(f))
     log = [r for r in j["log"] if not r.get("skipped")]
     ep = np.array([r["epoch"] for r in log])
     u = np.array([r.get("U_util", r["U"]) for r in log])
@@ -67,7 +77,7 @@ for sfx, name, col, ls in RUNS:
     sc = j["score_log"]
     axs[2].plot([s["epoch"] for s in sc], [s["U_score"] for s in sc], color=col, ls=ls, lw=1.6, marker="o", ms=3,
                 label=name)
-    if SET == "20b":
+    if SET != "20":
         axs[3].step([s["epoch"] for s in sc], [s.get("lr", np.nan) for s in sc], where="post", color=col, ls=ls,
                     lw=1.6, label=name)
     elif "cable_km" in log[0]:
@@ -98,9 +108,11 @@ for ax in axs:
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
 axs[0].legend(fontsize=8, frameon=False, loc="lower right")
-fig.suptitle("Run 20, Malata: Stage 4 training (swgo_trigger, 2,048 showers per step)" if SET == "20" else
-             "Run 20b, Malata: Stage 4 training under 10 µs background + kNN gate (8 × 2,048 showers per step, "
-             "drawn-count recon, drawn counts)", fontsize=12)
-out = os.path.join(C.RUN_LOCATION, "diagnostics", "opt_training" + ("_20b" if SET == "20b" else "") + ".png")
+fig.suptitle({"20": "Run 20, Malata: Stage 4 training (swgo_trigger, 2,048 showers per step)",
+              "20b": "Run 20b, Malata: Stage 4 training under 10 µs background + kNN gate (8 × 2,048 showers per step, "
+                     "drawn-count recon, drawn counts)",
+              "20c": "Run 20c, Malata: Stage 4 for 1° with the default recon on expected counts (no background: "
+                     "8 × 2,048 showers per step; 1 µs + kNN gate: 16 × 2,048)"}[SET], fontsize=12)
+out = os.path.join(C.RUN_LOCATION, "diagnostics", "opt_training" + ("" if SET == "20" else "_" + SET) + ".png")
 fig.savefig(out, dpi=170, facecolor="white")
 print("[write]", out)
