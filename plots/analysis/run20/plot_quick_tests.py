@@ -6,7 +6,8 @@ One section per noise level (no background, 1 us, 10 us); per layout and energy 
 describe) and the cable length. Red = best in the column (Notion colorbox).
 Writes <run 20>/diagnostics/quick/quick_tables_notion.md.
 
-    source slurm/run20_guard.sh; python plots/analysis/run20/plot_quick_tests.py [--recon deepsets_count|deepsets]
+    source slurm/run20_guard.sh; [QTAG=quick5] python plots/analysis/run20/plot_quick_tests.py [--recon deepsets_count|deepsets]
+QTAG=quick5: the 5 deg tests (diagnostics/quick5).
 """
 import argparse
 import glob
@@ -27,12 +28,14 @@ from modules.optimize.construction import describe  # noqa: E402
 ap = argparse.ArgumentParser()
 ap.add_argument("--recon", default="deepsets_count", choices=("deepsets_count", "deepsets"))
 args = ap.parse_args()
-D = os.path.join(C.RUN_LOCATION, "diagnostics", "quick")
+TAG = os.environ.get("QTAG", "quick")
+D = os.path.join(C.RUN_LOCATION, "diagnostics", TAG)
 PATHS = dict(l.strip().split("=", 1) for l in open(os.path.join(D, "layouts.txt")) if "=" in l)
-LABEL = {"grid_n99": "Grid", "sgd_nobg_lr1": "SGD, all E (earlier test)", "quick_e500_567": "SGD, E 5.00-5.67",
-         "quick_e567_633": "SGD, E 5.67-6.33", "quick_e633_700": "SGD, E 6.33-7.00", "quick_eall": "SGD, all E",
-         "quick_slope": "SGD + slope limit", "quick_access": "SGD + access", "quick_pads": "SGD + pads",
-         "quick_contour": "SGD + contour rows"}
+DEG = "5°" if TAG == "quick5" else "1°"
+LABEL = {"grid_n99": "Grid", "sgd_nobg_lr1": "SGD 1°, all E (earlier test)"}
+LABEL.update({f"{TAG}_{k}": f"SGD {DEG}, {v}" for k, v in (
+    ("e500_567", "E 5.00-5.67"), ("e567_633", "E 5.67-6.33"), ("e633_700", "E 6.33-7.00"), ("eall", "all E"),
+    ("slope", "+ slope limit"), ("access", "+ access"), ("pads", "+ pads"), ("contour", "+ contour rows"))})
 BANDS = [("5-5.667", "E 5.00–5.67"), ("5.667-6.333", "E 5.67–6.33"), ("6.333-7", "E 6.33–7.00"), ("all", "all E")]
 NOISE = [("0", "No background"), ("1000", "1 µs background"), ("10000", "10 µs background")]
 mark = lambda s: r"$\colorbox{#f8c4c4}{\textbf{" + s + "}}$"                                # noqa: E731
@@ -77,7 +80,7 @@ for k, p in PATHS.items():
         geo[k] = dict(describe(x, y, surf, m, grid_xy), cable_km=float(cable_length(x, y, surf)[0]) / 1e3)
 
 rec = "drawn-count recon" if args.recon == "deepsets_count" else "default recon"
-md = [f"## Run 20 quick tests: validation per energy band ({rec}, drawn counts, count seed 1, {nfiles} chunks)", "",
+md = [f"## Run 20 quick tests ({DEG} utility): validation per energy band ({rec}, drawn counts, count seed 1, {nfiles} chunks)", "",
       "Energy bands in log10 E [GeV]. Trig = share of ALL showers in the band that trigger (≥ 3 read-out detectors with a "
       "drawn particle); 1° / 2.5° / 5° = share of TRIGGERED showers within that angle; New U = mean[trig · (g_a + "
       "0.3(1−g_a)q_a)] over all showers. Layouts: the last step of each 100-step SGD test from the grid. Red = best in "

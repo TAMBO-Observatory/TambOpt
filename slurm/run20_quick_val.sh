@@ -14,6 +14,7 @@
 # held-out chunk of 5,000 showers with one recon: drawn counts (count seed 1), windows 0 / 1 / 10 us, all read out and
 # kNN gate, per energy band (--e-bins 5 5.667 6.333 7). Writes diagnostics/quick/val_<recon suffix>_<start>.json;
 # skips a chunk already written.
+# QTAG=quick5: the 5 deg tests' list and outputs (diagnostics/quick5).
 #   RUN_GUARD=run20 sbatch -J r20_quick_val slurm/run20_quick_val.sh <deepsets | deepsets_count> <event start>
 source slurm/env.sh
 source slurm/gpu_gate.sh
@@ -21,7 +22,7 @@ gpu_health_gate
 source slurm/run20_guard.sh
 export MPLCONFIGDIR=/tmp/mplcache_$USER PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 SFX=$1; S=$2
-O=$(python -c 'import modules.constants as C, os; print(os.path.join(C.RUN_LOCATION, "diagnostics", "quick"))')
+O=$(python -c 'import modules.constants as C, os; print(os.path.join(C.RUN_LOCATION, "diagnostics", os.environ.get("QTAG", "quick")))')
 RF=$(python -c 'import modules.constants as C; print(C.RECON_FOLDER)')
 f=$O/val_${SFX}_$S.json
 [ -f "$f" ] && { echo "exists: $f"; exit 0; }
