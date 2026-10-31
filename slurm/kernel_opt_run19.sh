@@ -90,6 +90,8 @@ fi
 [ "${COUNTING:-none}" = poisson ] && SUFFIX="${SUFFIX}_cnt"
 [ -n "$ACCUM" ] && [ "$ACCUM" != 1 ] && SUFFIX="${SUFFIX}_acc${ACCUM}"
 [ -n "$PLATEAU" ] && SUFFIX="${SUFFIX}_plat"
+# OPTIM=sgd: plain gradient ascent, lr = metres for a gradient as large as the first step's (_sgd)
+[ "${OPTIM:-adam}" = sgd ] && SUFFIX="${SUFFIX}_sgd"
 # CABLE=<lambda>: subtract the cable cost, lambda x 30 x (3-D MST length / grid_n99's) (CABLE_DMIN spacing hinge, default
 # 5 m); suffix _cab<lambda>
 if [ -n "$CABLE" ] && [ "$CABLE" != 0 ]; then
@@ -105,7 +107,7 @@ python -u scripts/04_optimize_lbfgs_kernel.py --init "$INIT" \
     ${FREEZE_UNSEEN:+--freeze-unseen} --lbfgs-chunks "${LBFGS_CHUNKS:-0}" --lbfgs-chunk-events "${LBFGS_EVENTS:-4096}" \
     --lbfgs-max-iter "${LBFGS_MAXITER:-40}" --counting "${COUNTING:-none}" --accum "${ACCUM:-1}" \
     ${PLATEAU:+--plateau-every ${PLATEAU_EVERY:-25} --plateau-min-frac ${PLATEAU_MIN_FRAC:-0.0333333}} \
-    --ckpt-every "${CKPT_EVERY:-250}"
+    --ckpt-every "${CKPT_EVERY:-250}" --optim "${OPTIM:-adam}"
 rc=$?
 # CHAIN=1 (run20b_submit.sh): the continuation jobs share this job's name; once the run has finished they are not needed
 [ "$rc" = 0 ] && [ -n "$CHAIN" ] && scancel --state=PENDING -u "$USER" -n "$SLURM_JOB_NAME"

@@ -6,7 +6,7 @@ is chosen on a fixed scoring set at the end of the pool (--n-score). Optional: c
 cosmic background (--bg-window-ns), kNN 2-of-3 gate (--gate knn23), the Stage 2 surrogate as the response
 (--response surrogate), frozen unseen detectors (--freeze-unseen), straight-through Poisson-drawn counts (--counting
 poisson), K-times larger batches in sub-batches (--accum K), a step size that drops when the scoring-set U stalls
-(--plateau-every). Resumes from opt_state.pt / lbfgs_state.pt.
+(--plateau-every), plain gradient ascent instead of Adam (--optim sgd). Resumes from opt_state.pt / lbfgs_state.pt.
 Output: <OPT_FOLDER>_lbfgs_kernel_<suffix>/layout_best.pt, optimize_log.json, layout_density.png.
 
     python scripts/04_optimize_lbfgs_kernel.py --precompute-bw <species index>      # once per run (kernel widths)
@@ -342,7 +342,13 @@ def run_main_pool(args, mountain, surface, recon, out_dir, resp=None):
 
     e_init, n_init = init_layout(mountain, args.init, DEVICE, args.n_det)
     xy_module = LearnableXY(e_init, n_init, device=str(DEVICE)).to(DEVICE)
-    optimizer = torch.optim.Adam(xy_module.parameters(), lr=args.lr)
+    # --optim sgd: plain gradient ascent; the step is proportional to the gradient, so a gradient that is mostly noise
+    # (averaging out over steps) moves little, where Adam moves every detector by ~lr per step whatever the direction.
+    # The lr is in metres for a gradient as large as the first step's: SGD's rate = lr / (per-detector RMS of the first
+    # step's gradient), saved for a resume (sgd_ref).
+    optimizer = (torch.optim.SGD(xy_module.parameters(), lr=args.lr) if args.optim == "sgd"
+                 else torch.optim.Adam(xy_module.parameters(), lr=args.lr))
+    sgd_ref = None
 
     def gen_for(seed):
         g = torch.Generator(device=DEVICE)
@@ -373,6 +379,7 @@ def run_main_pool(args, mountain, surface, recon, out_dir, resp=None):
         start, log, score_log = st["epoch"], st["log"], st["score_log"]
         best_u, best_x, best_y = st["best_u"], st["best_x"], st["best_y"]
         plat = st.get("plateau", plat)
+        sgd_ref = st.get("sgd_ref")
         print(f"[resume] {state_path} at epoch {start}, best scoring-set U={best_u:+.3f}"
               + (f", lr {plat['lr']:.3g}" if args.plateau_every > 0 else ""))
     else:
@@ -397,8 +404,6 @@ def run_main_pool(args, mountain, surface, recon, out_dir, resp=None):
     for epoch in range(start, args.epochs):
         if plat["stop"]:                          # resumed after the plateau schedule had already stopped the run
             break
-        for grp in optimizer.param_groups:
-            grp["lr"] = step_lr(epoch)
         optimizer.zero_grad(set_to_none=True)
         # --accum: K sub-batches of B showers, each back-propagated with weight 1 / K into the same gradients (the
         # loader prefetches the next sub-batch while one runs); memory is one sub-batch's
@@ -445,6 +450,13 @@ def run_main_pool(args, mountain, surface, recon, out_dir, resp=None):
             unseen = (~seen) if (args.freeze_unseen and (seen := tot["seen"]) is not None) else None
             if unseen is not None:
                 x_old, y_old = xy_module.x.detach().clone(), xy_module.y.detach().clone()
+            if args.optim == "sgd" and sgd_ref is None:
+                g2 = sum(float((p.grad ** 2).sum()) for p in xy_module.parameters() if p.grad is not None)
+                sgd_ref = max(np.sqrt(g2 / args.n_det), 1e-30)
+                print(f"  [sgd] first step's per-detector RMS gradient {sgd_ref:.3g}: lr {args.lr:g} m -> "
+                      f"rate {args.lr / sgd_ref:.3g}", flush=True)
+            for grp in optimizer.param_groups:
+                grp["lr"] = step_lr(epoch) / (sgd_ref if args.optim == "sgd" else 1.0)
             optimizer.step()
             if unseen is not None:
                 with torch.no_grad():
@@ -493,7 +505,7 @@ def run_main_pool(args, mountain, surface, recon, out_dir, resp=None):
             os.makedirs(out_dir, exist_ok=True)
             torch.save(dict(xy=xy_module.state_dict(), optimizer=optimizer.state_dict(),
                             epoch=epoch + 1, log=log, score_log=score_log, best_u=best_u,
-                            best_x=best_x, best_y=best_y, plateau=plat), state_path + ".tmp")
+                            best_x=best_x, best_y=best_y, plateau=plat, sgd_ref=sgd_ref), state_path + ".tmp")
             os.replace(state_path + ".tmp", state_path)
         if plat["stop"]:
             break
@@ -688,6 +700,9 @@ def main():
     ap.add_argument("--plateau-factor", type=float, default=0.5)
     ap.add_argument("--plateau-tol", type=float, default=0.05)
     ap.add_argument("--plateau-min-frac", type=float, default=1 / 30)
+    ap.add_argument("--optim", choices=("adam", "sgd"), default="adam",
+                    help="sgd: plain gradient ascent, step = lr x gradient / (first step's per-detector RMS gradient), "
+                         "i.e. lr metres for a gradient as large as the first one")
     args = ap.parse_args()
     if args.plateau_every > 0:
         args.score_every = args.plateau_every
