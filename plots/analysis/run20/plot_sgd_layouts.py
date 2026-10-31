@@ -3,9 +3,13 @@ grid start, on the detector region. Rows: Poisson trigger, step trigger; columns
 kNN gate lr 1 m. Each panel: grid start (grey rings), current positions, the move of each detector, and the scoring-set U
 (grid, best, latest). The detector region is drawn flat (light grey faces). --set sparse: the step-trigger runs of run20_sgd_sparse_test.sh (rows: 20-detector grid start,
 33 triplets of 25 m start; columns lr 1 / 3 m), with the median distance to the nearest and second-nearest detector.
-Writes <run 20>/diagnostics/r20b/sgd_layouts[_sparse].png.
+--set center: run20_sgd_center_test.sh (100 detectors from the centre start; rows Poisson / step trigger, columns lr 3 /
+10 m), with the grid's spacing for reference.
+--set energy / construct: the quick tests (slurm/run20_quick_tests.sh) from grid_n99: per energy band, per construction
+penalty.
+Writes <run 20>/diagnostics/r20b/sgd_layouts[_sparse|_center|_energy|_construct].png.
 
-    source slurm/run20_guard.sh; python plots/analysis/run20/plot_sgd_layouts.py [--set sparse]
+    source slurm/run20_guard.sh; python plots/analysis/run20/plot_sgd_layouts.py [--set sparse|center|energy|construct]
 """
 import argparse
 import os
@@ -24,17 +28,29 @@ import modules.constants as C  # noqa: E402
 from modules.geometry import load_tr_mountain, sample_initial_layout_ne  # noqa: E402
 from modules.geometry.mountain import _read_detector_region, _ecef_to_enu  # noqa: E402
 
-PRE = os.path.join(C.RUN_LOCATION, "test_v6_run_04_optimize_lbfgs_kernel_sgdtest_")
+PRE = os.path.join(C.RUN_LOCATION, "test_v6_run_04_optimize_lbfgs_kernel_")
 ap = argparse.ArgumentParser()
-ap.add_argument("--set", choices=("grid", "sparse"), default="grid")
+ap.add_argument("--set", choices=("grid", "sparse", "center", "energy", "construct"), default="grid")
 SET = ap.parse_args().set
 TRI = os.path.join(C.RUN_LOCATION, "diagnostics", "triplets", "layouts", "tri33_r25_n99.pt")
 if SET == "grid":       # (folder prefix, row name, colour, start: detector count or layout file)
-    ROWS = [("", "Poisson trigger", "#2a6fb0", 100), ("step_", "step trigger", "#e07b39", 100)]
+    ROWS = [("sgdtest_", "Poisson trigger", "#2a6fb0", 100), ("sgdtest_step_", "step trigger", "#e07b39", 100)]
     COLS = [("nobg_lr0p3", "no bg, lr 0.3 m"), ("nobg_lr1", "no bg, lr 1 m"), ("nobg_lr3", "no bg, lr 3 m"),
             ("1us_lr1", "1 µs + kNN, lr 1 m")]
+elif SET == "center":   # start (scheme, detectors)
+    ROWS = [("sgdtest_center_poisson_", "Poisson trigger, centre start", "#2a6fb0", ("center", 100)),
+            ("sgdtest_center_step_", "step trigger, centre start", "#e07b39", ("center", 100))]
+    COLS = [("lr3", "lr 3 m"), ("lr10", "lr 10 m")]
+elif SET in ("energy", "construct"):
+    GRID99 = os.path.join(C.RUN_LOCATION, "diagnostics", "triplets", "layouts", "grid_n99.pt")
+    ROWS = [("quick_", "", "#2a6fb0" if SET == "energy" else "#e07b39", GRID99)]
+    COLS = ([("e500_567", "log10 E 5.00-5.67"), ("e567_633", "log10 E 5.67-6.33"), ("e633_700", "log10 E 6.33-7.00"),
+             ("eall", "all energies")] if SET == "energy" else
+            [("slope", "slope limit"), ("access", "access distance"), ("pads", "station pads (K 20)"),
+             ("contour", "contour rows (8)")])
 else:
-    ROWS = [("step_n20_", "20-det. grid start", "#2a6fb0", 20), ("step_tri25_", "triplets 25 m start", "#e07b39", TRI)]
+    ROWS = [("sgdtest_step_n20_", "20-det. grid start", "#2a6fb0", 20),
+            ("sgdtest_step_tri25_", "triplets 25 m start", "#e07b39", TRI)]
     COLS = [("lr1", "lr 1 m"), ("lr3", "lr 3 m")]
 
 
@@ -54,7 +70,8 @@ def start(spec):
     if isinstance(spec, str):
         lay = torch.load(spec, map_location="cpu")
         return lay["x"].float().numpy(), lay["y"].float().numpy()
-    return tuple(np.asarray(v, float) for v in sample_initial_layout_ne(m, n_units=spec, scheme="grid"))
+    scheme, n = spec if isinstance(spec, tuple) else ("grid", spec)
+    return tuple(np.asarray(v, float) for v in sample_initial_layout_ne(m, n_units=n, scheme=scheme))
 
 fig, axs = plt.subplots(len(ROWS), len(COLS), figsize=(4.6 * len(COLS), 5.6 * len(ROWS)), constrained_layout=True,
                         squeeze=False)
@@ -80,11 +97,13 @@ for r, (pre, rname, col, spec) in enumerate(ROWS):
         ax.add_collection(LineCollection(np.stack([np.c_[e0, n0], np.c_[x, y]], 1), colors=col, linewidths=0.8))
         ax.scatter(x, y, s=10, color=col, lw=0, zorder=3, label=f"step {st['epoch']}")
         u0, ul = sc[0]["U_score"], sc[-1]["U_score"]
-        ax.set_title(f"{rname}, {cname}\nscoring U: grid {u0:.2f}, best {st['best_u']:.2f}, "
+        ax.set_title(f"{rname + ', ' if rname else ''}{cname}\nscoring U: start {u0:.2f}, best {st['best_u']:.2f}, "
                      f"step {sc[-1]['epoch']} {ul:.2f} ({100 * (ul / u0 - 1):+.1f}%)\n"
                      f"move: median {np.median(mv):.1f} m, max {mv.max():.0f} m"
                      + ("\nnearest / 2nd nearest: {:.0f} / {:.0f} m -> {:.0f} / {:.0f} m".format(*nn12(e0, n0), *nn12(x, y))
-                        if SET == "sparse" else ""), fontsize=8.5)
+                        if SET != "grid" else "")
+                     + ("\n(grid: {:.0f} / {:.0f} m, U {})".format(*nn12(*start(100)), "15.05" if "poisson" in pre else "14.43")
+                        if SET == "center" else ""), fontsize=8.5)
         ax.legend(fontsize=7, frameon=False, loc="lower left")
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)
@@ -92,8 +111,11 @@ for ax in axs[:, 0]:
     ax.set_ylabel("North [m]")
 for ax in axs[-1]:
     ax.set_xlabel("East [m]")
-fig.suptitle("Run 20 SGD tests: layouts at the latest checkpoint" + ("\n" if SET == "sparse" else " ") + "(1° utility, default recon, expected counts, "
-             "4 × 2,048 showers per step" + (", step trigger, no background)" if SET == "sparse" else ")"), fontsize=12)
-out = os.path.join(C.RUN_LOCATION, "diagnostics", "r20b", "sgd_layouts" + ("_sparse" if SET == "sparse" else "") + ".png")
+fig.suptitle(("Run 20 quick tests" if SET in ("energy", "construct") else "Run 20 SGD tests")
+             + ": layouts at the latest checkpoint" + ("\n" if SET != "grid" else " ") + "(1° utility, default recon, expected counts, "
+             "4 × 2,048 showers per step" + {"sparse": ", step trigger, no background)", "center": ", no background)",
+              "energy": ", Poisson trigger, no background; 8 x 2,048 loaded per step, a band keeps ~1/3)",
+              "construct": ", Poisson trigger, no background, one construction penalty each)"}.get(SET, ")"), fontsize=12)
+out = os.path.join(C.RUN_LOCATION, "diagnostics", "r20b", "sgd_layouts" + ("" if SET == "grid" else "_" + SET) + ".png")
 fig.savefig(out, dpi=170, facecolor="white")
 print("[write]", out)

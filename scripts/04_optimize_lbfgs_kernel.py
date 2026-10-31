@@ -36,7 +36,7 @@ from modules.constants import (
 )
 from modules.constants import (
     DUAL_SHOWER_CACHE_PATH, DATASET_FRACTION, NUM_SHOWERS, SPECIES_NAMES,
-    TRAINING_DATASET_FOLDER, FNN_FOLDER,
+    TRAINING_DATASET_FOLDER, FNN_FOLDER, LOG_E_MIN, LOG_E_MAX,
 )
 from modules.data.dataset_builder import compute_labels_batch, place_clouds, _load_corpus_metadata
 from modules.showers.kernel import adaptive_bandwidths
@@ -49,6 +49,7 @@ from modules.optimize.background import add_background, window_centres, knn_pair
 from modules.optimize.counting import expected_counts, CountingTransform
 from modules.optimize.objective import UTILITY_MODE, TWO_TIER_SCALE
 from modules.optimize.cable import cable_length
+from modules.optimize.construction import ConstructionCost, parse as parse_construct
 from modules.surrogates import load_dual_surrogate
 from modules.surrogates import build_recon_from_ckpt
 
@@ -312,18 +313,47 @@ class CableCost:
         print(f"[cable] lambda={CABLE_LAMBDA:g}  d_min={CABLE_DMIN:g} m  L_ref (grid_n99) = {self.l_ref / 1e3:.2f} km")
 
     def __call__(self, x, y):
-        """(penalty tensor, L [m])."""
+        """(penalty tensor, {cable_km})."""
         L, h = cable_length(x, y, self.surface, CABLE_DMIN)
-        return TWO_TIER_SCALE * (CABLE_LAMBDA * L / self.l_ref + h / CABLE_DMIN ** 2), float(L)
+        return TWO_TIER_SCALE * (CABLE_LAMBDA * L / self.l_ref + h / CABLE_DMIN ** 2), dict(cable_km=float(L) / 1e3)
+
+
+class Penalties:
+    """The active layout penalties (cable, construction terms) as one: (summed penalty tensor, merged info dict)."""
+
+    def __init__(self, terms):
+        self.terms = terms
+
+    def __call__(self, x, y):
+        pens, info = [], {}
+        for t in self.terms:
+            p, i = t(x, y)
+            pens.append(p)
+            info.update(i)
+        return sum(pens), info
+
+
+def make_penalties(mountain, surface):
+    """Penalties for TAMBOPT_CABLE_LAMBDA / TAMBOPT_CONSTRUCT, or None (the objective is then the plain utility)."""
+    terms = []
+    if CABLE_LAMBDA > 0:
+        terms.append(CableCost(mountain, surface))
+    if parse_construct():
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(0)
+            e, n = init_layout(mountain, "grid", DEVICE, 99)
+        terms.append(ConstructionCost(mountain, surface, (e, n)))
+    return Penalties(terms) if terms else None
 
 
 def add_cable(cable, xy_module, tot, backward):
-    """Subtract the cable penalty from tot["U"] (backward: add its gradient); tot keeps U_util, cable_km, penalty."""
+    """Subtract the layout penalties from tot["U"] (backward: add their gradient); tot keeps U_util, penalty and the
+    penalties' info (cable_km, construction metrics)."""
     with (torch.enable_grad() if backward else torch.no_grad()):
-        pen, L = cable(*xy_module())
+        pen, info = cable(*xy_module())
         if backward:
             pen.backward()
-    tot.update(U_util=tot["U"], cable_km=L / 1e3, penalty=float(pen))
+    tot.update(U_util=tot["U"], penalty=float(pen), **info)
     tot["U"] -= float(pen)
     return tot
 
@@ -331,6 +361,16 @@ def add_cable(cable, xy_module, tot, backward):
 def run_main_pool(args, mountain, surface, recon, out_dir, resp=None):
     pool = MainPool(mountain)
     load = pool.load_prim if resp is not None and resp["surrogate"] is not None else pool.load
+    if args.e_range:                              # --e-range: only showers with log10 E [GeV] in [lo, hi)
+        lo, hi = args.e_range
+        load_all = load
+
+        def load(a, b):
+            clouds, bws, prim, frames = load_all(a, b)
+            le = prim[:, 3] * (LOG_E_MAX - LOG_E_MIN) + LOG_E_MIN
+            k = (le >= lo) & (le < hi)
+            return ([c[k] for c in clouds], [w[k] if w is not None else None for w in bws], prim[k],
+                    frames[k] if frames is not None else None)
     n_score = args.n_score
     n_sweep = pool.n - n_score
     B = args.batch_events
@@ -338,7 +378,10 @@ def run_main_pool(args, mountain, surface, recon, out_dir, resp=None):
           f"(events {n_sweep}..{pool.n}); {B} fresh events per step")
     t0 = time.time()
     score_set = load(n_sweep, pool.n)
-    print(f"[pool] scoring set loaded ({score_set[2].shape[0]} events) in {time.time() - t0:.0f}s")
+    print(f"[pool] scoring set loaded ({score_set[2].shape[0]} events) in {time.time() - t0:.0f}s"
+          + (f"; energy band log10 E in [{args.e_range[0]:g}, {args.e_range[1]:g}): {score_set[2].shape[0]} of "
+             f"{n_score} scoring showers, ~{B * score_set[2].shape[0] / n_score:.0f} of {B} per sub-batch"
+             if args.e_range else ""))
 
     e_init, n_init = init_layout(mountain, args.init, DEVICE, args.n_det)
     args.n_det = len(e_init)                      # a layout file sets the detector count
@@ -356,7 +399,7 @@ def run_main_pool(args, mountain, surface, recon, out_dir, resp=None):
         g.manual_seed(int(seed))
         return g
 
-    cable = CableCost(mountain, surface) if CABLE_LAMBDA > 0 else None
+    cable = make_penalties(mountain, surface)          # cable and / or construction penalties
 
     def score():
         # the same background draws every time, so scores are comparable across steps
@@ -500,7 +543,10 @@ def run_main_pool(args, mountain, surface, recon, out_dir, resp=None):
                   f"(u_theta={tot['u_theta']:.3f} u_phi={tot['u_phi']:.3f} "
                   f"u_e={tot['u_e']:.3f})  r={tot['r_mean']:.3f}  read={tot['read']:.3f} ghosts={tot['ghosts']:.3f}  "
                   f"lr={step_lr(epoch):.3g}  frozen={tot.get('frozen', 0)}  "
-                  + (f"U_util={tot['U_util']:+.3f} cable={tot['cable_km']:.2f}km  " if cable else "")
+                  + (f"U_util={tot['U_util']:+.3f} penalty={tot['penalty']:.3f} "
+                     + " ".join(f"{k}={tot[k]:.3g}" for k in tot if k.startswith(("cable_km", "slope_", "access_m",
+                                                                               "pad_rms", "row_rms", "pen_"))) + "  "
+                     if cable else "")
                   + f"{(time.time() - t_loop) / (epoch + 1 - start):.2f}s/epoch", flush=True)
         if (epoch + 1) % args.ckpt_every == 0 or plat["stop"]:
             os.makedirs(out_dir, exist_ok=True)
@@ -706,6 +752,8 @@ def main():
     ap.add_argument("--plateau-factor", type=float, default=0.5)
     ap.add_argument("--plateau-tol", type=float, default=0.05)
     ap.add_argument("--plateau-min-frac", type=float, default=1 / 30)
+    ap.add_argument("--e-range", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                    help="only showers with log10 E [GeV] in [LO, HI) (training batches and scoring set)")
     ap.add_argument("--optim", choices=("adam", "sgd"), default="adam",
                     help="sgd: plain gradient ascent, step = lr x gradient / (first step's per-detector RMS gradient), "
                          "i.e. lr metres for a gradient as large as the first one")
