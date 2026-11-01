@@ -47,7 +47,7 @@ elif SET in ("energy", "construct"):
     GRID99 = os.path.join(C.RUN_LOCATION, "diagnostics", "triplets", "layouts", "grid_n99.pt")
     QTAG = os.environ.get("QTAG", "quick")                 # quick5: the 5 deg tests
     ROWS = [(QTAG + "_", "", "#2a6fb0" if SET == "energy" else "#e07b39",
-             ("grid", 100) if QTAG.startswith("sur") else GRID99)]   # surrogate runs: the 100-detector grid
+             ("grid", 100) if QTAG.startswith(("sur", "ker")) else GRID99)]   # surrogate runs: the 100-detector grid
     COLS = ([("e500_567", "log10 E 5.00-5.67"), ("e567_633", "log10 E 5.67-6.33"), ("e633_700", "log10 E 6.33-7.00"),
              ("eall", "all energies")] if SET == "energy" else
             [("slope", "slope limit"), ("access", "access distance"), ("pads", "station pads (K 20)"),
@@ -124,7 +124,7 @@ fig.suptitle(("Run 20 quick tests" if SET in ("energy", "construct") else "Run 2
               "energy": ", Poisson trigger, no background; 8 x 2,048 loaded per step, a band keeps ~1/3)",
               "construct": ", Poisson trigger, no background, one construction penalty each)"}.get(SET, ")"), fontsize=12)
 out = os.path.join(C.RUN_LOCATION, "diagnostics", "r20b", "sgd_layouts" + ("" if SET == "grid" else "_" + SET)
-                   + ({"quick5": "_5deg", "sur5": "_sur5deg", "sur5_1us": "_sur5deg_1us"}.get(os.environ.get("QTAG"), "")
+                   + ({"quick5": "_5deg", "sur5": "_sur5deg", "sur5_1us": "_sur5deg_1us", "ker5": "_ker5deg"}.get(os.environ.get("QTAG"), "")
                       if SET in ("energy", "construct") else "")
                    + ("_final" if FINAL else "") + ".png")
 fig.savefig(out, dpi=170, facecolor="white")
