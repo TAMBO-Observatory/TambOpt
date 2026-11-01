@@ -19,6 +19,7 @@
 # RESP=surrogate: the full runs on the run 20 Stage 2 surrogate (response surrogate, expected counts from its lit
 # values): STEPS (default 1000) steps, names sur5_<name> with THETA=5 (sur_<name> otherwise).
 # NSTEPS=<n> with the kernel: full runs of n steps, names ker5_<name> (as the surrogate runs, on the kernel).
+# TRIGONLY=1: the trigger alone as utility (TAMBOPT_TRIG_ONLY, no angle / energy reward): tags trg / trg_1us.
 # BG=1000: 1 us cosmic background, all detectors read out, trigger on all (no gate); names get _1us after the tag (e.g.
 # sur5_1us_<name>). GATE=knn23 adds the kNN 2-of-3 gate with the trigger on read-out detectors (TRIG_GATED; _1us_knn).
 # CHUNK=<n> showers per backward (default 16; memory and speed only: the surrogate runs use 512).
@@ -47,6 +48,9 @@ if [ "${RESP:-kernel}" = surrogate ]; then
     STEPS=${NSTEPS:-1000}; EXTRA="--response surrogate"; QTAG=${QTAG/quick/sur}
 elif [ -n "$NSTEPS" ]; then          # full kernel runs (the surrogate runs' counterpart): ker5_<name>
     STEPS=$NSTEPS; QTAG=${QTAG/quick/ker}
+fi
+if [ -n "$TRIGONLY" ]; then
+    export TAMBOPT_TRIG_ONLY=1; QTAG=trg
 fi
 if [ -n "$BG" ] && [ "$BG" != 0 ]; then
     EXTRA="$EXTRA --bg-window-ns $BG"
