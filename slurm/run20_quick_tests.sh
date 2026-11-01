@@ -20,6 +20,7 @@
 # values): STEPS (default 1000) steps, names sur5_<name> with THETA=5 (sur_<name> otherwise).
 # BG=1000: 1 us cosmic background, all detectors read out, trigger on all (no gate); names get _1us after the tag (e.g.
 # sur5_1us_<name>). GATE=knn23 adds the kNN 2-of-3 gate with the trigger on read-out detectors (TRIG_GATED; _1us_knn).
+# CHUNK=<n> showers per backward (default 16; memory and speed only: the surrogate runs use 512).
 # SMOKE=1: 3 steps of every config of the set, one after another on one slice. ONLY=<0-3>: only that config, on one GPU
 # (one job per config on gpu_requeue: sbatch -p gpu_requeue --gres=gpu:1 ...; resumes from opt_state.pt after a requeue).
 # With fewer GPUs than configs the 4 share them round-robin (on gpu_requeue: one GPU, 4 processes, as the MIG tests).
@@ -68,7 +69,7 @@ IFS=, read -ra DEVS <<< "$CUDA_VISIBLE_DEVICES"
 run () {  # <slice> <i>
     n=${QTAG}_${NAMES[$2]}$([ -n "$SMOKE" ] && echo _smoke)
     env CUDA_VISIBLE_DEVICES=${DEVS[$(($1 % ${#DEVS[@]}))]} ${ENVS[$2]} python -u scripts/04_optimize_lbfgs_kernel.py --init ${INIT:-grid} --n-det 100 \
-        --optim sgd --lr 1 --epochs $STEPS --batch-events 2048 --chunk 16 --score-every 25 --log-every 10 \
+        --optim sgd --lr 1 --epochs $STEPS --batch-events 2048 --chunk ${CHUNK:-16} --score-every 25 --log-every 10 \
         --ckpt-every 10 ${ARGS[$2]} $EXTRA --out-suffix $n > $L/$n.log 2>&1
 }
 rc=0
