@@ -90,7 +90,7 @@ for r, (pre, rname, col, spec) in enumerate(ROWS):
         ax.set_aspect("equal")
         ax.tick_params(labelsize=7)
         f = os.path.join(PRE + pre + key, "opt_state.pt")
-        if not os.path.exists(f):
+        if pre + key in os.environ.get("QSKIP", "").split(",") or not os.path.exists(f):     # QSKIP: unreadable runs
             ax.set_title(f"{rname}, {cname}\n(no checkpoint)", fontsize=9)
             continue
         st = torch.load(f, map_location="cpu", weights_only=False)
