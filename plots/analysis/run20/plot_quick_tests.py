@@ -31,7 +31,7 @@ args = ap.parse_args()
 TAG = os.environ.get("QTAG", "quick")
 D = os.path.join(C.RUN_LOCATION, "diagnostics", TAG)
 PATHS = dict(l.strip().split("=", 1) for l in open(os.path.join(D, "layouts.txt")) if "=" in l)
-DEG = "5°" if TAG.endswith("5") else "1°"
+DEG = "5°" if TAG.split("_")[0].endswith("5") else "1°"
 OPTN = "Sur. SGD" if TAG.startswith("sur") else "SGD"
 LABEL = {"grid_n99": "Grid (99)", "grid_n100": "Grid (100, start)", "sgd_nobg_lr1": "SGD 1°, all E (earlier test)"}
 LABEL.update({f"{TAG}_{k}": f"{OPTN} {DEG}, {v}" for k, v in (

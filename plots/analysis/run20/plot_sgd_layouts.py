@@ -118,13 +118,13 @@ for ax in axs[-1]:
     ax.set_xlabel("East [m]")
 fig.suptitle(("Run 20 quick tests" if SET in ("energy", "construct") else "Run 20 SGD tests")
              + ": layouts at the latest checkpoint" + ("\n" if SET != "grid" else " ")
-             + ("(5°" if os.environ.get("QTAG", "").endswith("5") and SET in ("energy", "construct") else "(1°")
+             + ("(5°" if os.environ.get("QTAG", "").split("_")[0].endswith("5") and SET in ("energy", "construct") else "(1°")
              + " utility, default recon, expected counts, "
              "4 × 2,048 showers per step" + {"sparse": ", step trigger, no background)", "center": ", no background)",
               "energy": ", Poisson trigger, no background; 8 x 2,048 loaded per step, a band keeps ~1/3)",
               "construct": ", Poisson trigger, no background, one construction penalty each)"}.get(SET, ")"), fontsize=12)
 out = os.path.join(C.RUN_LOCATION, "diagnostics", "r20b", "sgd_layouts" + ("" if SET == "grid" else "_" + SET)
-                   + ({"quick5": "_5deg", "sur5": "_sur5deg"}.get(os.environ.get("QTAG"), "")
+                   + ({"quick5": "_5deg", "sur5": "_sur5deg", "sur5_1us": "_sur5deg_1us"}.get(os.environ.get("QTAG"), "")
                       if SET in ("energy", "construct") else "")
                    + ("_final" if FINAL else "") + ".png")
 fig.savefig(out, dpi=170, facecolor="white")
