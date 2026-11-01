@@ -31,9 +31,10 @@ args = ap.parse_args()
 TAG = os.environ.get("QTAG", "quick")
 D = os.path.join(C.RUN_LOCATION, "diagnostics", TAG)
 PATHS = dict(l.strip().split("=", 1) for l in open(os.path.join(D, "layouts.txt")) if "=" in l)
-DEG = "5°" if TAG == "quick5" else "1°"
-LABEL = {"grid_n99": "Grid", "sgd_nobg_lr1": "SGD 1°, all E (earlier test)"}
-LABEL.update({f"{TAG}_{k}": f"SGD {DEG}, {v}" for k, v in (
+DEG = "5°" if TAG.endswith("5") else "1°"
+OPTN = "Sur. SGD" if TAG.startswith("sur") else "SGD"
+LABEL = {"grid_n99": "Grid (99)", "grid_n100": "Grid (100, start)", "sgd_nobg_lr1": "SGD 1°, all E (earlier test)"}
+LABEL.update({f"{TAG}_{k}": f"{OPTN} {DEG}, {v}" for k, v in (
     ("e500_567", "E 5.00-5.67"), ("e567_633", "E 5.67-6.33"), ("e633_700", "E 6.33-7.00"), ("eall", "all E"),
     ("slope", "+ slope limit"), ("access", "+ access"), ("pads", "+ pads"), ("contour", "+ contour rows"))})
 BANDS = [("5-5.667", "E 5.00–5.67"), ("5.667-6.333", "E 5.67–6.33"), ("6.333-7", "E 6.33–7.00"), ("all", "all E")]
@@ -55,14 +56,15 @@ def pooled():
                 for rd in ("none", "knn"):
                     for w, r in by[rd].items():
                         n = r["n_showers"]
-                        v = n * np.array([r["triggered"], r["all_1"], r["all_2.5"], r["all_5"], r["u_swgo_drawn"], 1.0])
+                        v = n * np.array([r["triggered"], r["all_1"], r["all_2.5"], r["all_5"], r["u_swgo_drawn"], 1.0,
+                                          r["ghosts"]])
                         k = (band, lay, rd, w)
                         acc[k] = acc.get(k, 0.0) + v
     out = {}
     for (band, lay, rd, w), v in acc.items():
         n = v[5]
         out.setdefault(band, {}).setdefault(lay, {}).setdefault(rd, {})[w] = np.r_[
-            100 * v[0] / n, 100 * v[1:4] / max(v[0], 1e-9), v[4] / n]
+            100 * v[0] / n, 100 * v[1:4] / max(v[0], 1e-9), v[4] / n, v[6] / n]
     return out, len(files)
 
 
@@ -105,6 +107,22 @@ for w, wname in NOISE:
         head = " | ".join(f"{bn}: Trig | 1° | 2.5° | 5° | New U" for _, bn in BANDS)
         md += ["", f"### {wname}, {rname}", "", f"| Layout | {head} |", "|---" * (1 + 5 * len(BANDS)) + "|"]
         md += ["| " + " | ".join(r) + " |" for r in rows]
+GF = os.path.join(D, "ghost_scores.json")             # background-only windows (score_ghost.py), if scored
+GH = json.load(open(GF))["scores"] if os.path.exists(GF) else {}
+md += ["", "### Ghosts (all energies)", "",
+       "Ghost det. = background-only detectors read out per shower (kernel showers + background, drawn counts); "
+       "Ghost trig = share of background-only windows that trigger (≥ 3 read-out detectors with a particle; lower is "
+       "better).", "",
+       "| Layout | 1 µs all: ghost det. | ghost trig [%] | 1 µs kNN: ghost det. | ghost trig [%] | "
+       "10 µs all: ghost det. | ghost trig [%] | 10 µs kNN: ghost det. | ghost trig [%] |", "|---" * 9 + "|"]
+for k in keys:
+    cells = [LABEL.get(k, k)]
+    for w in ("1000", "10000"):
+        for rd in ("none", "knn"):
+            v = S.get("all", {}).get(k, {}).get(rd, {}).get(w)
+            g = GH.get(k, {}).get(rd, {}).get(w, {}).get("ghost_trig")
+            cells += [f"{v[5]:.2f}" if v is not None else "–", f"{100 * g:.1f}" if g is not None else "–"]
+    md.append("| " + " | ".join(cells) + " |")
 md += ["", "### Construction metrics", "",
        "Mean terrain slope under the detectors; share above the slope limit (the median slope under the grid); mean 3-D "
        "distance to the access point (lowest point of the region); RMS distance to the nearest of 20 pad centres "

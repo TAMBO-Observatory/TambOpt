@@ -31,7 +31,9 @@ from modules.geometry.mountain import _read_detector_region, _ecef_to_enu  # noq
 PRE = os.path.join(C.RUN_LOCATION, "test_v6_run_04_optimize_lbfgs_kernel_")
 ap = argparse.ArgumentParser()
 ap.add_argument("--set", choices=("grid", "sparse", "center", "energy", "construct"), default="grid")
-SET = ap.parse_args().set
+ap.add_argument("--final-only", action="store_true", help="only the final positions (no start rings or moves); _final.png")
+A = ap.parse_args()
+SET, FINAL = A.set, A.final_only
 TRI = os.path.join(C.RUN_LOCATION, "diagnostics", "triplets", "layouts", "tri33_r25_n99.pt")
 if SET == "grid":       # (folder prefix, row name, colour, start: detector count or layout file)
     ROWS = [("sgdtest_", "Poisson trigger", "#2a6fb0", 100), ("sgdtest_step_", "step trigger", "#e07b39", 100)]
@@ -44,7 +46,8 @@ elif SET == "center":   # start (scheme, detectors)
 elif SET in ("energy", "construct"):
     GRID99 = os.path.join(C.RUN_LOCATION, "diagnostics", "triplets", "layouts", "grid_n99.pt")
     QTAG = os.environ.get("QTAG", "quick")                 # quick5: the 5 deg tests
-    ROWS = [(QTAG + "_", "", "#2a6fb0" if SET == "energy" else "#e07b39", GRID99)]
+    ROWS = [(QTAG + "_", "", "#2a6fb0" if SET == "energy" else "#e07b39",
+             ("grid", 100) if QTAG.startswith("sur") else GRID99)]   # surrogate runs: the 100-detector grid
     COLS = ([("e500_567", "log10 E 5.00-5.67"), ("e567_633", "log10 E 5.67-6.33"), ("e633_700", "log10 E 6.33-7.00"),
              ("eall", "all energies")] if SET == "energy" else
             [("slope", "slope limit"), ("access", "access distance"), ("pads", "station pads (K 20)"),
@@ -94,9 +97,10 @@ for r, (pre, rname, col, spec) in enumerate(ROWS):
         x, y = st["xy"]["x"].float().numpy(), st["xy"]["y"].float().numpy()
         sc = st["score_log"]
         mv = np.hypot(x - e0, y - n0)
-        ax.scatter(e0, n0, s=14, facecolors="none", edgecolors="#8a8a8a", lw=0.8, label="start")
-        ax.add_collection(LineCollection(np.stack([np.c_[e0, n0], np.c_[x, y]], 1), colors=col, linewidths=0.8))
-        ax.scatter(x, y, s=10, color=col, lw=0, zorder=3, label=f"step {st['epoch']}")
+        if not FINAL:
+            ax.scatter(e0, n0, s=14, facecolors="none", edgecolors="#8a8a8a", lw=0.8, label="start")
+            ax.add_collection(LineCollection(np.stack([np.c_[e0, n0], np.c_[x, y]], 1), colors=col, linewidths=0.8))
+        ax.scatter(x, y, s=16 if FINAL else 10, color=col, lw=0, zorder=3, label=f"step {st['epoch']}")
         u0, ul = sc[0]["U_score"], sc[-1]["U_score"]
         ax.set_title(f"{rname + ', ' if rname else ''}{cname}\nscoring U: start {u0:.2f}, best {st['best_u']:.2f}, "
                      f"step {sc[-1]['epoch']} {ul:.2f} ({100 * (ul / u0 - 1):+.1f}%)\n"
@@ -114,12 +118,14 @@ for ax in axs[-1]:
     ax.set_xlabel("East [m]")
 fig.suptitle(("Run 20 quick tests" if SET in ("energy", "construct") else "Run 20 SGD tests")
              + ": layouts at the latest checkpoint" + ("\n" if SET != "grid" else " ")
-             + ("(5°" if os.environ.get("QTAG") == "quick5" and SET in ("energy", "construct") else "(1°")
+             + ("(5°" if os.environ.get("QTAG", "").endswith("5") and SET in ("energy", "construct") else "(1°")
              + " utility, default recon, expected counts, "
              "4 × 2,048 showers per step" + {"sparse": ", step trigger, no background)", "center": ", no background)",
               "energy": ", Poisson trigger, no background; 8 x 2,048 loaded per step, a band keeps ~1/3)",
               "construct": ", Poisson trigger, no background, one construction penalty each)"}.get(SET, ")"), fontsize=12)
 out = os.path.join(C.RUN_LOCATION, "diagnostics", "r20b", "sgd_layouts" + ("" if SET == "grid" else "_" + SET)
-                   + ("_5deg" if SET in ("energy", "construct") and os.environ.get("QTAG") == "quick5" else "") + ".png")
+                   + ({"quick5": "_5deg", "sur5": "_sur5deg"}.get(os.environ.get("QTAG"), "")
+                      if SET in ("energy", "construct") else "")
+                   + ("_final" if FINAL else "") + ".png")
 fig.savefig(out, dpi=170, facecolor="white")
 print("[write]", out)

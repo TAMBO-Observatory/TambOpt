@@ -22,6 +22,14 @@ RUNS = [("sgd_nobg_lr1", "sgdtest_nobg_lr1")] + [
 OUT = os.path.join(C.RUN_LOCATION, "diagnostics", TAG)
 os.makedirs(OUT, exist_ok=True)
 lines = ["grid_n99=" + os.path.join(C.RUN_LOCATION, "diagnostics", "triplets", "layouts", "grid_n99.pt")]
+if TAG.startswith("sur"):            # the surrogate runs start from Stage 4's 100-detector grid: add it as their baseline
+    from modules.geometry import load_tr_mountain, sample_initial_layout_ne, project_to_mountain_ne
+    m = load_tr_mountain(C.GEOMETRY_PATH_RESOLVED, C.GEOMETRY_GROUP, C.DET_KEY, east_entry=C.EAST_ENTRY,
+                         layer_east_dx=C.LAYER_EAST_DX, n_planes=C.N_PLANES)
+    e, n = sample_initial_layout_ne(m, n_units=100, scheme="grid")
+    e, n = project_to_mountain_ne(m, torch.as_tensor(e, dtype=torch.float32), torch.as_tensor(n, dtype=torch.float32))
+    torch.save(dict(x=e.float(), y=n.float()), os.path.join(OUT, "grid_n100.pt"))
+    lines.append("grid_n100=" + os.path.join(OUT, "grid_n100.pt"))
 for key, sfx in RUNS:
     st = torch.load(os.path.join(PRE + sfx, "opt_state.pt"), map_location="cpu", weights_only=False)
     f = os.path.join(PRE + sfx, "layout_final.pt")

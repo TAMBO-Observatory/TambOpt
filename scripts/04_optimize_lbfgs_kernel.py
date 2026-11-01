@@ -160,13 +160,26 @@ class BatchKernel:
 
 class SurrogateResponse:
     """Stage 2 hurdle surrogate as the detector response, thresholded at P(lit) >= p_min
-    (MultiSpeciesSurrogate.forward_thresholded): same call signature as BatchKernel."""
+    (as MultiSpeciesSurrogate.forward_thresholded): same call signature as BatchKernel. Also sets `mu`, the expected
+    detected particles per detector (counting.expected_counts on the per-species lit values, band scaling: no shower
+    frame, r = None), differentiable, for the swgo_trigger utility, as BatchKernel does."""
 
     def __init__(self, surrogate, p_min):
         self.surrogate, self.p_min = surrogate, p_min
+        self.mu = None
 
     def __call__(self, primary_batch, xy_batch):
-        return self.surrogate.forward_thresholded(primary_batch, xy_batch, self.p_min)
+        preds, t_min = [], None
+        for m in self.surrogate.models:
+            p, v = m.forward_parts(primary_batch, xy_batch)
+            n_s = torch.where(p[..., 0] >= self.p_min, torch.expm1(v[..., 0]).clamp(min=0.0), torch.zeros_like(v[..., 0]))
+            preds.append(torch.stack([torch.log1p(n_s), torch.zeros_like(n_s)], -1))
+            t_s = torch.where(p[..., 1] >= self.p_min, v[..., 1].clamp(min=0.0), torch.full_like(v[..., 1], float("inf")))
+            t_min = t_s if t_min is None else torch.minimum(t_min, t_s)
+        t_min = torch.where(torch.isfinite(t_min), t_min, torch.zeros_like(t_min))
+        self.mu = sum(expected_counts(preds, None, species=self.surrogate.species))
+        n_tot = sum(torch.expm1(q[..., 0]) for q in preds)
+        return torch.stack([torch.log1p(n_tot), t_min], dim=-1)
 
 
 class NoisyGated:
