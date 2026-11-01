@@ -52,6 +52,9 @@ fi
 if [ -n "$TRIGONLY" ]; then
     export TAMBOPT_TRIG_ONLY=1; QTAG=trg
 fi
+if [ -n "$PENONLY" ]; then          # PENONLY=1: no utility at all, the construction penalty alone (tag pen; construct set)
+    export TAMBOPT_UTIL_ZERO=1; QTAG=pen
+fi
 if [ -n "$BG" ] && [ "$BG" != 0 ]; then
     EXTRA="$EXTRA --bg-window-ns $BG"
     QTAG=${QTAG}_$([ "$BG" = 1000 ] && echo 1us || echo bg${BG}ns)

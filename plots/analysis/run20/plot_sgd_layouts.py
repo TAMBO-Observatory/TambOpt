@@ -30,7 +30,7 @@ from modules.geometry.mountain import _read_detector_region, _ecef_to_enu  # noq
 
 PRE = os.path.join(C.RUN_LOCATION, "test_v6_run_04_optimize_lbfgs_kernel_")
 ap = argparse.ArgumentParser()
-ap.add_argument("--set", choices=("grid", "sparse", "center", "energy", "construct"), default="grid")
+ap.add_argument("--set", choices=("grid", "sparse", "center", "energy", "construct", "construct_cmp"), default="grid")
 ap.add_argument("--final-only", action="store_true", help="only the final positions (no start rings or moves); _final.png")
 A = ap.parse_args()
 SET, FINAL = A.set, A.final_only
@@ -43,6 +43,11 @@ elif SET == "center":   # start (scheme, detectors)
     ROWS = [("sgdtest_center_poisson_", "Poisson trigger, centre start", "#2a6fb0", ("center", 100)),
             ("sgdtest_center_step_", "step trigger, centre start", "#e07b39", ("center", 100))]
     COLS = [("lr3", "lr 3 m"), ("lr10", "lr 10 m")]
+elif SET == "construct_cmp":   # construction penalties: 5 deg utility (sur5) against trigger only (trg), surrogate
+    ROWS = [("sur5_", "5° utility", "#2a6fb0", ("grid", 100)), ("trg_", "trigger only", "#e07b39", ("grid", 100)),
+            ("pen_", "penalty only", "#5b8c3a", ("grid", 100))]
+    COLS = [("slope", "slope limit"), ("access", "access distance"), ("pads", "station pads (K 20)"),
+            ("contour", "contour rows (8)")]
 elif SET in ("energy", "construct"):
     GRID99 = os.path.join(C.RUN_LOCATION, "diagnostics", "triplets", "layouts", "grid_n99.pt")
     QTAG = os.environ.get("QTAG", "quick")                 # quick5: the 5 deg tests
@@ -116,7 +121,7 @@ for ax in axs[:, 0]:
     ax.set_ylabel("North [m]")
 for ax in axs[-1]:
     ax.set_xlabel("East [m]")
-fig.suptitle(("Run 20 quick tests" if SET in ("energy", "construct") else "Run 20 SGD tests")
+fig.suptitle(("Run 20 quick tests" if SET in ("energy", "construct", "construct_cmp") else "Run 20 SGD tests")
              + ": layouts at the latest checkpoint" + ("\n" if SET != "grid" else " ")
              + ("(5°" if os.environ.get("QTAG", "").split("_")[0].endswith("5") and SET in ("energy", "construct") else "(1°")
              + " utility, default recon, expected counts, "
@@ -128,5 +133,11 @@ out = os.path.join(C.RUN_LOCATION, "diagnostics", "r20b", "sgd_layouts" + ("" if
                        "trg_1us": "_trigonly_1us"}.get(os.environ.get("QTAG"), "")
                       if SET in ("energy", "construct") else "")
                    + ("_final" if FINAL else "") + ".png")
+if SET == "construct_cmp":
+    fig.suptitle("Run 20: final layouts with one construction penalty each, Stage 2 surrogate, SGD 1,000 steps from the "
+                 "100-detector grid, no background\nrows: 5° Poisson utility + penalty; trigger only + penalty (no "
+                 "reconstruction term); the penalty alone (no utility)", fontsize=12)
+    out = os.path.join(C.RUN_LOCATION, "diagnostics", "r20b", "sgd_layouts_construct_sur5_vs_trigonly"
+                       + ("_final" if FINAL else "") + ".png")
 fig.savefig(out, dpi=170, facecolor="white")
 print("[write]", out)

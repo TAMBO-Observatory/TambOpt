@@ -17,12 +17,12 @@ import modules.constants as C  # noqa: E402
 PRE = os.path.join(C.RUN_LOCATION, "test_v6_run_04_optimize_lbfgs_kernel_")
 TAG = os.environ.get("QTAG", "quick")
 RUNS = [("sgd_nobg_lr1", "sgdtest_nobg_lr1")] + [
-    (f"{TAG}_{k}", f"{TAG}_{k}") for k in ("e500_567", "e567_633", "e633_700", "eall", "slope", "access", "pads",
-                                            "contour")]
+    (f"{TAG}_{k}", f"{TAG}_{k}") for k in (() if TAG == "pen" else ("e500_567", "e567_633", "e633_700", "eall"))
+    + ("slope", "access", "pads", "contour")]                            # pen: construction runs only
 OUT = os.path.join(C.RUN_LOCATION, "diagnostics", TAG)
 os.makedirs(OUT, exist_ok=True)
 lines = ["grid_n99=" + os.path.join(C.RUN_LOCATION, "diagnostics", "triplets", "layouts", "grid_n99.pt")]
-if TAG.startswith(("sur", "ker", "trg")):   # the surrogate / full kernel runs start from Stage 4's 100-detector grid: add it as their baseline
+if TAG.startswith(("sur", "ker", "trg", "pen")):   # the surrogate / full kernel runs start from Stage 4's 100-detector grid: add it as their baseline
     from modules.geometry import load_tr_mountain, sample_initial_layout_ne, project_to_mountain_ne
     m = load_tr_mountain(C.GEOMETRY_PATH_RESOLVED, C.GEOMETRY_GROUP, C.DET_KEY, east_entry=C.EAST_ENTRY,
                          layer_east_dx=C.LAYER_EAST_DX, n_planes=C.N_PLANES)

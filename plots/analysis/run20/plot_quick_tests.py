@@ -33,8 +33,8 @@ D = os.path.join(C.RUN_LOCATION, "diagnostics", TAG)
 PATHS = dict(l.strip().split("=", 1) for l in open(os.path.join(D, "layouts.txt")) if "=" in l)
 SKIP = set(filter(None, os.environ.get("QSKIP", "").split(",")))     # layouts whose files are unreadable (left out)
 PATHS = {k: v for k, v in PATHS.items() if k not in SKIP}
-DEG = "trigger-only" if TAG.startswith("trg") else "5°" if TAG.split("_")[0].endswith("5") else "1°"
-OPTN = {"sur": "Sur. SGD", "ker": "Ker. SGD", "trg": "Sur. SGD"}.get(TAG[:3], "SGD")
+DEG = "penalty-only" if TAG == "pen" else "trigger-only" if TAG.startswith("trg") else "5°" if TAG.split("_")[0].endswith("5") else "1°"
+OPTN = {"sur": "Sur. SGD", "ker": "Ker. SGD", "trg": "Sur. SGD", "pen": "SGD"}.get(TAG[:3], "SGD")
 LABEL = {"grid_n99": "Grid (99)", "grid_n100": "Grid (100, start)", "sgd_nobg_lr1": "SGD 1°, all E (earlier test)"}
 LABEL.update({f"{TAG}_{k}": f"{OPTN} {DEG}, {v}" for k, v in (
     ("e500_567", "E 5.00-5.67"), ("e567_633", "E 5.67-6.33"), ("e633_700", "E 6.33-7.00"), ("eall", "all E"),

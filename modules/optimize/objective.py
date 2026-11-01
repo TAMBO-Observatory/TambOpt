@@ -70,6 +70,8 @@ TRIG_OFF          = os.environ.get("TAMBOPT_TRIG_OFF", "0") == "1"
 # TAMBOPT_TRIG_ONLY=1: no reconstruction term, u = r_b (the trigger probability alone): detection without the angle /
 # energy reward, to see what the trigger and the layout penalties do on their own
 TRIG_ONLY         = os.environ.get("TAMBOPT_TRIG_ONLY", "0") == "1"
+# TAMBOPT_UTIL_ZERO=1: the utility is 0 (kept in the graph): only the layout penalties (cable / construction) act
+UTIL_ZERO         = os.environ.get("TAMBOPT_UTIL_ZERO", "0") == "1"
 _TT_PARAMS = None
 
 
@@ -414,6 +416,8 @@ def utility_of_xy(x_det: torch.Tensor,
             g = g * torch.sigmoid((0.2 - e) / 0.05)
             q2 = q2 + (e / 0.5) ** 2
         u = rb if TRIG_ONLY else rb * (g + TWO_TIER_LAMBDA * (1.0 - g) / (1.0 + q2))
+        if UTIL_ZERO:
+            u = 0.0 * u
         U = TWO_TIER_SCALE * u.mean()
         # parts: u_theta = U, u_phi = trigger rate, u_e = triggered and good, u_pr = good (any trigger); all x30
         parts = dict(u_theta=U, u_phi=TWO_TIER_SCALE * rb.mean(), u_e=TWO_TIER_SCALE * (rb * g).mean(),
