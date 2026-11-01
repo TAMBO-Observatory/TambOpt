@@ -55,6 +55,9 @@ fi
 if [ -n "$PENONLY" ]; then          # PENONLY=1: no utility at all, the construction penalty alone (tag pen; construct set)
     export TAMBOPT_UTIL_ZERO=1; QTAG=pen
 fi
+if [ -n "$LHS" ]; then            # LHS=<seed>: start from a Latin-hypercube layout (Stage 4 --init lhs:<seed>), tag _lhs<seed>
+    INIT=lhs:$LHS; QTAG=${QTAG}_lhs$LHS
+fi
 if [ -n "$BG" ] && [ "$BG" != 0 ]; then
     EXTRA="$EXTRA --bg-window-ns $BG"
     QTAG=${QTAG}_$([ "$BG" = 1000 ] && echo 1us || echo bg${BG}ns)

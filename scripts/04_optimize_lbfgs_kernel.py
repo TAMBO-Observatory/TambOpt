@@ -693,11 +693,34 @@ def load_recon(recon_dir, device):
     return recon
 
 
+def lhs_on_mesh(mountain, n_det, seed):
+    """Latin hypercube restricted to the detector region: an LHS of m >= n_det points over the (East, North) bbox (one
+    per stratum on each axis, axes paired at random), keeping the points the mesh projection leaves in place (< 1 m),
+    m grown until at least n_det land on the mesh; then n_det of them at random. Unlike the bbox LHS
+    (layouts.strategies.layout_latin_hypercube), no detectors are pushed onto the region's edge on top of each other."""
+    rng = np.random.default_rng(seed)
+    m = n_det
+    while True:
+        u_n = ((np.arange(m) + rng.random(m)) / m)[rng.permutation(m)]
+        u_e = ((np.arange(m) + rng.random(m)) / m)[rng.permutation(m)]
+        N = torch.as_tensor(mountain.n_min + u_n * (mountain.n_max - mountain.n_min), dtype=torch.float32)
+        E = torch.as_tensor(mountain.east_lo + u_e * (mountain.east_hi - mountain.east_lo), dtype=torch.float32)
+        ep, np_ = project_to_mountain_ne(mountain, E, N)
+        inside = torch.hypot(ep - E, np_ - N) < 1.0
+        if int(inside.sum()) >= n_det:
+            idx = torch.as_tensor(rng.choice(np.flatnonzero(inside.numpy()), n_det, replace=False))
+            return E[idx], N[idx]
+        m = int(m * 1.3) + 1
+
+
 def init_layout(mountain, scheme, device, n_det=N_DETECTORS):
-    """grid / center, or a layout file (.pt with x, y; its own detector count)"""
+    """grid / center, lhs:<seed> (Latin hypercube over the mountain bbox, projected to the surface;
+    layouts.strategies.layout_latin_hypercube), or a layout file (.pt with x, y; its own detector count)"""
     if scheme.endswith(".pt"):
         lay = torch.load(scheme, map_location="cpu")
         e, n = lay["x"].float(), lay["y"].float()
+    elif scheme.startswith("lhs"):
+        e, n = lhs_on_mesh(mountain, n_det, int(scheme.split(":")[1]) if ":" in scheme else 0)
     else:
         e, n = sample_initial_layout_ne(mountain, n_units=n_det, scheme=scheme)
         e = torch.as_tensor(e, dtype=torch.float32)
@@ -708,7 +731,7 @@ def init_layout(mountain, scheme, device, n_det=N_DETECTORS):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--init", default="center", help="grid, center or a layout file (.pt with x, y)")
+    ap.add_argument("--init", default="center", help="grid, center, lhs:<seed> or a layout file (.pt with x, y)")
     ap.add_argument("--n-det", type=int, default=N_DETECTORS,
                     help="detectors in the layout; the DeepSets recon takes any count")
     ap.add_argument("--epochs", type=int, default=200, help="Adam steps")
