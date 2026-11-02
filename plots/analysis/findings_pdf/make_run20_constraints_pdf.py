@@ -325,6 +325,13 @@ pages.append(page([F + "utility_curves_other.png"], [
     "Penalty only: pads and contour converge within ~200 steps; access is still moving at step 1,000",
     "Trigger only + pads missing: its folder is locked on the file system",
 ]))
+pages.append(page([F + "utility_curves_kernel_snapshots.png"], [
+    "Four surrogate runs rerun with snapshots every 100 steps; each snapshot scored on the kernel (5,000 held-out showers)",
+    "all E, E 5.00-5.67: the surrogate U rises (blue), the kernel New U only scatters around the start (±0.004, the",
+    "     sampling noise of 5,000 showers): the surrogate's gain does not carry over to the kernel",
+    "pads: kernel New U falls steadily (0.829 -> 0.787) as the pads form, the price of the construction preference",
+    "contour rows: flat for ~300 steps, then -0.005: the terraces cost < 1% also along the path",
+]))
 pages.append(page([F + "utility_curves_lhs.png"], [
     "Five Latin-hypercube starts per configuration: the curves converge to the same level within ~200 steps",
 ]))
