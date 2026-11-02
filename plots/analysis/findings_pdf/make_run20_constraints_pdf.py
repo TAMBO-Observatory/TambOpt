@@ -333,7 +333,8 @@ pages.append(page([F + "utility_curves_kernel_snapshots.png"], [
     "contour rows: flat for ~300 steps, then -0.005: the terraces cost < 1% also along the path",
 ]))
 pages.append(page([F + "utility_curves_lhs.png"], [
-    "Five Latin-hypercube starts per configuration: the curves converge to the same level within ~200 steps",
+    "Five Latin-hypercube starts per configuration: the five curves reach the same level within ~200 steps",
+    "     (e.g. 5° all E: 25.8-26.1 at the start, 26.1-26.2 from step 200 on); access is still rising at step 1,000",
 ]))
 pages.append(section_page("Final layouts", "Surrogate (all objectives), Latin-hypercube repeats, kernel"))
 for p in (F + "all_layouts.png", DG + "lhs/lhs_layouts.png", DG + "ker5/compare_sur_kernel.png"):

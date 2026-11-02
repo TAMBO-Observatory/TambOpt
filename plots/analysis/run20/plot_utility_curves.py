@@ -117,7 +117,7 @@ cols = plt.cm.viridis(np.linspace(0, 0.9, 5))
 fig, axs = plt.subplots(3, 4, figsize=(20, 13), constrained_layout=True)
 for ax, (pat, name) in zip(axs.flat, CFG):
     for i, s in enumerate((1, 2, 3, 4, 5)):
-        d = load(pat.format(s=f"lhs{s}"))
+        d = load(pat.format(s=s))
         if d is not None:
             ax.plot(d["se"], d["su"], color=cols[i], lw=1.4, label=f"seed {s}")
     style(ax, name)
