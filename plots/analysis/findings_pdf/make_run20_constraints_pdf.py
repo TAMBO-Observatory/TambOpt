@@ -313,6 +313,21 @@ pages.append(table_page("Surrogate vs kernel (same start and settings)", rows, [
     "The kernel gradient is noisier, so the same step setting wanders further: E 5.00-5.67 collapses (cable 3.9 km)",
 ]))
 
+pages.append(section_page("Utility over iterations", "Training batches and the fixed scoring set, all 1,000-step runs"))
+pages.append(page([F + "utility_curves_5deg.png"], [
+    "Surrogate runs (blue) rise in the first ~100 steps and then stay flat: converged on a plateau",
+    "Kernel runs (orange) peak by step 100-300 and then decline: constant-step SGD on a noisy gradient random-walks away",
+    "     (E 5.00-5.67: 27.9 -> 22.0); the final layouts are worse than the best ones (layout_best.pt, near the peak)",
+    "Penalty runs: U - penalty rises while the penalty is paid off; access still rising at step 1,000",
+]))
+pages.append(page([F + "utility_curves_other.png"], [
+    "Trigger only: P(trigger) gains < 0.1 of 30 (already ~95%); the 6.33-7.00 band slowly declines (noise)",
+    "Penalty only: pads and contour converge within ~200 steps; access is still moving at step 1,000",
+    "Trigger only + pads missing: its folder is locked on the file system",
+]))
+pages.append(page([F + "utility_curves_lhs.png"], [
+    "Five Latin-hypercube starts per configuration: the curves converge to the same level within ~200 steps",
+]))
 pages.append(section_page("Final layouts", "Surrogate (all objectives), Latin-hypercube repeats, kernel"))
 for p in (F + "all_layouts.png", DG + "lhs/lhs_layouts.png", DG + "ker5/compare_sur_kernel.png"):
     pages.append(full_page(p))
