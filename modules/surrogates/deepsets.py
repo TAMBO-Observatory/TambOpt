@@ -1,0 +1,220 @@
+"""Permutation-equivariant per-detector surrogate. Drop-in for FNNSurrogate.
+
+The response kernel is strictly per-detector-local, `(E_i, T_i) = phi(q, x_i, y_i)`
+with no cross-detector term, so a shared per-detector map is the right inductive
+bias. A flat MLP had to learn it separately for all 100 slots and approximate
+permutation invariance by augmentation; DeepSets is equivariant by construction
+(-23% val loss, the only lever that broke the flat-MLP plateau — THEORY.md 10).
+
+    token_i = [q (8), x_i, y_i]              # 10 features per detector
+    h_i     = psi(token_i)                   # shared encoder
+    c       = mean_i h_i -> context proj     # permutation-INVARIANT pool
+    mu_i    = rho([h_i, c])                  # shared decoder, per channel
+
+MEAN-ONLY. The decoder emits mu per channel and nothing else; `forward()` returns
+it in raw units, which is FNNSurrogate's contract and what Steps 3-4 and
+`dual.py` consume.
+
+This model used to be heteroscedastic — a second pair of logvar outputs feeding a
+Gaussian-NLL trainer, meant to let it express the aleatoric floor rather than
+collapse to a conditional mean. That path was retired: every run since 13 trained
+with `--nll-warmup-frac 1.0`, i.e. 100% mean-only warm-up and zero NLL epochs, so
+no variance head was ever actually fitted, and Stage 3 had to carry a
+`--fnn-mean-only` flag to avoid sampling from the untrained head. Keeping a head
+that is always dead-weight cost two decoder output rows, a zero-init hack to stop
+it corrupting the trunk at a switch that never happened, and a `var_param`
+branch. Dropping it makes `out_dim` 4 -> 2 per detector.
+
+Checkpoint compatibility: a 2-output decoder CANNOT load a 4-output state dict, so
+checkpoints written before this change (runs 12/13/14) do not load here.
+
+Normalization reuses FNNSurrogate's buffers verbatim (widths 208 and 200), so
+`set_normalization` is identical and the trainer's in-place log-T stat mutation
+flows through.
+"""
+
+import torch
+import torch.nn as nn
+
+from ..constants import N_DETECTORS, PRIMARY_DIM
+from .blocks import _mlp
+
+
+class DeepSetsSurrogate(nn.Module):
+    """Permutation-equivariant per-detector surrogate. Drop-in for FNNSurrogate.
+
+    Args:
+        n_det       : number of detectors (output set size).
+        primary_dim : primary encoding width (PRIMARY_DIM = 8: direction, energy,
+                      pdg, decay vertex). Never hardcode — checkpoints store it.
+        hidden      : per-detector encoder/decoder width.
+        context     : pooled-context width (the invariant global summary).
+        n_enc       : encoder MLP depth (≥2).
+        n_dec       : decoder MLP depth (≥2).
+        dropout     : 0.0 recommended — DeepSets is parameter-light and the
+                      surrogate underfits, so regularization is counterproductive.
+    """
+
+    def __init__(self,
+                 n_det:       int = N_DETECTORS,
+                 primary_dim: int = PRIMARY_DIM,
+                 hidden:      int = 256,
+                 context:     int = 64,
+                 n_enc:       int = 3,
+                 n_dec:       int = 3,
+                 dropout:     float = 0.0,
+                 hurdle:      bool = False):
+        super().__init__()
+        self.hurdle      = bool(hurdle)
+        self.n_det       = n_det
+        self.primary_dim = primary_dim
+        self.hidden      = hidden
+        self.context     = context
+
+        token_dim = primary_dim + 2                      # [q, x_i, y_i]
+        self.encoder = _mlp(token_dim, hidden, hidden, n_enc, dropout)
+        self.context_proj = nn.Linear(hidden, context)
+        # 2 outputs per detector: mu_E, mu_T (both z-scored). The hurdle head
+        # adds a lit/dark logit per channel in front: (logit_E, logit_T, mu_E,
+        # mu_T), with mu fitted on lit slots only and z-scored by lit-only stats.
+        self.decoder = _mlp(hidden + context, hidden, 4 if self.hurdle else 2, n_dec, dropout)
+
+        # SAME buffer layout as FNNSurrogate so set_normalization is identical
+        # and the trainer's log-T stat mutation (out_mean[n_det:]) flows through.
+        in_dim  = primary_dim + 2 * n_det
+        out_dim = 2 * n_det                              # 200
+        self.register_buffer("in_mean",  torch.zeros(in_dim))
+        self.register_buffer("in_std",   torch.ones(in_dim))
+        self.register_buffer("out_mean", torch.zeros(out_dim))
+        self.register_buffer("out_std",  torch.ones(out_dim))
+        if self.hurdle:
+            # Lit-only (E, T) mean/std in the raw log space, for the value head.
+            # Registered only here, so mean-only state dicts are unchanged.
+            self.register_buffer("hit_mean", torch.zeros(2))
+            self.register_buffer("hit_std",  torch.ones(2))
+
+    def set_normalization(self, stats: dict):
+        """Identical contract to FNNSurrogate.set_normalization."""
+        self.in_mean.copy_(stats["in_mean"])
+        self.in_std.copy_(stats["in_std"])
+        self.out_mean.copy_(stats["out_mean"])
+        self.out_std.copy_(stats["out_std"])
+        if self.hurdle:
+            self.hit_mean.copy_(stats["hit_mean"])
+            self.hit_std.copy_(stats["hit_std"])
+
+    def _forward_z(self, primary: torch.Tensor, xy: torch.Tensor):
+        """Shared encoder/decoder pass, entirely in z-scored space.
+
+        Returns:
+            (B, nd, 2) z-scored per-channel mean (mu_E, mu_T); for the hurdle
+            head (B, nd, 4) = (logit_E, logit_T, mu_E, mu_T), mu z-scored by
+            the lit-only stats.
+        """
+        B = primary.shape[0]
+        nd = xy.shape[1]           # any detector count: the stats are shared by all slots (n_det only sizes the buffers)
+
+        # Per-feature z-score scalars pulled from the broadcast-shared buffers:
+        #   in_mean = [primary(5), x0,y0, x1,y1, ...]  → x stat at idx 5, y at 6.
+        #   out_mean = [E(100), T(100)]                → E stat at 0, T at n_det.
+        p_mean = self.in_mean[:self.primary_dim]                       # (primary_dim,)
+        p_std  = self.in_std[:self.primary_dim]
+        x_mean, x_std = self.in_mean[self.primary_dim],     self.in_std[self.primary_dim]
+        y_mean, y_std = self.in_mean[self.primary_dim + 1], self.in_std[self.primary_dim + 1]
+
+        q_n = (primary - p_mean) / p_std                              # (B, primary_dim)
+        q_n = q_n.unsqueeze(1).expand(B, nd, -1)                       # (B, nd, primary_dim)
+        x_n = (xy[..., 0] - x_mean) / x_std                           # (B, nd)
+        y_n = (xy[..., 1] - y_mean) / y_std
+        token = torch.cat([q_n, x_n.unsqueeze(-1), y_n.unsqueeze(-1)], dim=-1)  # (B, nd, 7)
+
+        h = self.encoder(token)                                       # (B, nd, hidden)
+        c = self.context_proj(h.mean(dim=1))                          # (B, context)  invariant pool
+        c = c.unsqueeze(1).expand(B, nd, -1)                          # (B, nd, context)
+        mu_z = self.decoder(torch.cat([h, c], dim=-1))                # (B, nd, 2)  z-scored
+        return mu_z
+
+    def _unnorm_mean(self, mu_z: torch.Tensor) -> torch.Tensor:
+        nd = self.n_det
+        E_mean, E_std = self.out_mean[0],  self.out_std[0]
+        T_mean, T_std = self.out_mean[nd], self.out_std[nd]
+        E_out = mu_z[..., 0] * E_std + E_mean
+        T_out = mu_z[..., 1] * T_std + T_mean
+        return torch.stack([E_out, T_out], dim=-1)                    # (B, nd, 2)
+
+    def forward_parts(self, primary: torch.Tensor, xy: torch.Tensor):
+        """Hurdle head only: (P(lit), lit value), each (B, n_det, 2) in the
+        same raw log units as forward()."""
+        if not self.hurdle:
+            raise AttributeError("forward_parts needs a hurdle surrogate")
+        out = self._forward_z(primary, xy)
+        p = torch.sigmoid(out[..., :2])
+        mu = out[..., 2:] * self.hit_std + self.hit_mean
+        return p, mu
+
+    def forward(self, primary: torch.Tensor, xy: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            primary : (B, primary_dim)
+            xy      : (B, n_det, 2)
+        Returns:
+            (B, n_det, 2) — col0 = E, col1 = T, unnormalized units (drop-in
+            contract for Steps 3-4 and surrogates/dual.py). For the hurdle head
+            this is the expected reading P(lit) * value: a dark slot's label is
+            exactly 0 in both channels' log space, so it is the MSE-optimal
+            prediction of the same label the mean-only head regresses.
+        """
+        if self.hurdle:
+            p, mu = self.forward_parts(primary, xy)
+            return p * mu
+        return self._unnorm_mean(self._forward_z(primary, xy))
+
+
+def build_surrogate_from_ckpt(ckpt: dict, n_det: int, primary_dim: int, device=None):
+    """Construct the right surrogate class from a checkpoint's `config`.
+
+    Lets Steps 3/4 load EITHER a flat-MLP `fnn.pt` (config has no `model_type`,
+    or `model_type="fnn"`) OR a DeepSets `fnn.pt` (`model_type="deepsets"`)
+    without the caller knowing which. Returns an eval-mode, frozen model with
+    normalization already applied from the checkpoint's `norm_stats`.
+
+    Usage (replace the hardcoded `FNNSurrogate(...)` block in 03/04):
+
+        ckpt = torch.load(os.path.join(FNN_FOLDER, "fnn.pt"), map_location=DEVICE)
+        fnn  = build_surrogate_from_ckpt(ckpt, N_DETECTORS, PRIMARY_DIM, DEVICE)
+    """
+    from .fnn import FNNSurrogate
+    cfg = ckpt.get("config", {})
+    mtype = cfg.get("model_type", "fnn")
+    if mtype == "deepsets":
+        # a DeepSets surrogate runs on any detector count; its buffers keep the training count (from the checkpoint)
+        n_det = int(ckpt["state_dict"]["out_mean"].numel() // 2) if "out_mean" in ckpt["state_dict"] else n_det
+        model = DeepSetsSurrogate(
+            n_det=n_det, primary_dim=primary_dim,
+            hidden=int(cfg.get("hidden", 256)),
+            context=int(cfg.get("context", 64)),
+            n_enc=int(cfg.get("n_enc", 3)),
+            n_dec=int(cfg.get("n_dec", 3)),
+            dropout=float(cfg.get("dropout", 0.0)),
+            hurdle=bool(cfg.get("hurdle", False)),
+        )
+        # `var_param` / `var_min` may still be present in a pre-mean-only
+        # checkpoint's config. They are ignored rather than rejected here; the
+        # load_state_dict below is what actually refuses such a checkpoint, and
+        # its shape-mismatch error names the decoder layer, which is the more
+        # useful diagnostic.
+    else:
+        model = FNNSurrogate(
+            n_det=n_det, primary_dim=primary_dim,
+            hidden=int(cfg.get("hidden", 512)),
+            dropout=float(cfg.get("dropout", 0.1)),
+        )
+    model.load_state_dict(ckpt["state_dict"])
+    if "norm_stats" in ckpt:
+        model.set_normalization(ckpt["norm_stats"])
+    if device is not None:
+        model = model.to(device)
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
+    return model

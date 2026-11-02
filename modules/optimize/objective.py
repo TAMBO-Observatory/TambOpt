@@ -1,0 +1,633 @@
+"""The U(x, y) objective shared by all three Step-4 optimizers.
+
+Holds the objective itself, the ensemble bookkeeping (`assign`,
+`align_to_reference`), the gradient-turn diagnostic, model loading, and the
+composite weights and thresholds. Figure helpers live in
+`plots/lib/opt_plotting.py`.
+
+**`utility_of_xy` is deliberately NOT `@torch.no_grad()`-decorated** so L-BFGS
+can backprop through it; the gradient-free DE optimizers wrap their own score
+calls instead.
+"""
+import math
+import os
+from typing import Optional
+
+import numpy as np
+import torch
+from scipy.optimize import linear_sum_assignment
+
+from ..constants import (
+    N_DETECTORS, FNN_FOLDER, RECON_FOLDER,
+    GEOMETRY_PATH, GEOMETRY_PATH_RESOLVED, LOG_E_MIN, LOG_E_MAX,
+    SIGMA_SPATIAL,
+)
+from ..surrogates import load_dual_surrogate
+from ..surrogates import build_recon_from_ckpt
+# modules/__init__ injected the v3 (`modules`) path on package import.
+from .utility import reconstructability, U_E, U_angle, U_PR, U_two_tier, U_three_tier, angle_between_deg
+
+# Utility selector (run 17). "current" = the weighted 1/err^2 composite below; "two_tier" =
+# U_two_tier (count showers reconstructed well, bounded partial credit for the rest), with
+# thresholds from a calibration JSON (kernel accuracy targets translated to what the recon
+# shows through the surrogate). Set per job through the environment so the same code serves
+# every Stage-4 invocation; unset = "current", i.e. unchanged behaviour.
+UTILITY_MODE      = os.environ.get("TAMBOPT_UTILITY", "current")
+TWO_TIER_LAMBDA   = float(os.environ.get("TAMBOPT_TWO_TIER_LAMBDA", "0.3"))
+TWO_TIER_CALIB    = os.environ.get("TAMBOPT_TWO_TIER_CALIB", "")
+# "three_tier" (run 19): U_three_tier, exclusive levels 1 deg / 5 deg / detected (>= 3 detectors with
+# > 1 particle, soft); weights w1,w5,wd from TAMBOPT_THREE_TIER (default 0.9,0.3,0.1). Same x30 scale.
+THREE_TIER_W      = tuple(float(v) for v in os.environ.get("TAMBOPT_THREE_TIER", "0.9,0.3,0.1").split(","))
+THREE_TIER_MIN_DET = 3
+# U_two_tier lives in (0, 1); Stage 4's penalty weight and gradient clip are quoted "in units
+# of U" for a composite of order 30, so the two-tier value is scaled to that range.
+TWO_TIER_SCALE    = 30.0
+# "swgo_trigger" (branch swgo-trigger): the two-tier reward times the trigger probability r_b = P(>= TRIG_K detectors
+# with >= 1 particle), Poisson-binomial over p_i = 1 - exp(-mu_i) (counting.trigger_prob); mu_i = expected detected
+# particles (background.particles_per_E, eps_gamma 0.02) scaled from 2 m^2 to TAMBOPT_TRIG_AREA m^2. A shower that does
+# not trigger scores 0. The response must provide `mu` (B, nd) with gradients (Stage 4 BatchKernel does in this mode).
+# Reward: g = soft within 5 deg (x soft |dlog10 E| < 0.2 with TAMBOPT_TRIG_ENERGY=1), partial credit
+# TWO_TIER_LAMBDA * (1 - g) * q as two-tier (theta_ref 20 deg, e_ref 0.5). Recon input unchanged (noise-free kernel).
+TRIG_K            = int(os.environ.get("TAMBOPT_TRIG_K", "3"))
+TRIG_AREA_M2      = float(os.environ.get("TAMBOPT_TRIG_AREA", "2.0"))
+TRIG_ENERGY       = os.environ.get("TAMBOPT_TRIG_ENERGY", "0") == "1"
+# TAMBOPT_TRIG_MODE=step: the SWGOLO notebook's trigger on EXPECTED counts instead of the Poisson probability:
+# per detector sigmoid(TRIG_SLOPE (mu - TRIG_MU0)), per shower r_b = sigmoid(5 (sum - TRIG_K)) (0.5 at exactly TRIG_K).
+# A near-step: detectors placed together cross the threshold together (the notebook's source of triplets).
+TRIG_MODE         = os.environ.get("TAMBOPT_TRIG_MODE", "poisson")
+TRIG_MU0          = float(os.environ.get("TAMBOPT_TRIG_MU0", "1.0"))
+TRIG_SLOPE        = float(os.environ.get("TAMBOPT_TRIG_SLOPE", "10.0"))   # 10: a dark detector adds sigmoid(-10) ~ 5e-5 (5 leaks ~0.7 over 100)
+# The reward's angle scale (run 20b): g = sigmoid((TRIG_THETA - a) / TRIG_WIDTH), q = 1 / (1 + (a / TRIG_QREF)^2 [+ ...]).
+# Defaults 5 / 1 / 20 are the original swgo_trigger reward; 1 / 0.2 / 5 rewards 1 deg reconstruction.
+TRIG_THETA        = float(os.environ.get("TAMBOPT_TRIG_THETA", "5.0"))
+TRIG_WIDTH        = float(os.environ.get("TAMBOPT_TRIG_WIDTH", "1.0"))
+TRIG_QREF         = float(os.environ.get("TAMBOPT_TRIG_QREF", "20.0"))
+# TAMBOPT_TRIG_GATED=1: the trigger counts only read-out detectors (the response's `gate_mask`, kNN gate; the expected
+# shower counts, never background). TAMBOPT_TRIG_OFF=1: no trigger term (r_b = 1); with TRIG_ENERGY=1 and the default
+# angle scale this is the tables' Old U, mean[g + 0.3 (1 - g) q].
+TRIG_GATED        = os.environ.get("TAMBOPT_TRIG_GATED", "0") == "1"
+TRIG_OFF          = os.environ.get("TAMBOPT_TRIG_OFF", "0") == "1"
+# TAMBOPT_TRIG_ONLY=1: no reconstruction term, u = r_b (the trigger probability alone): detection without the angle /
+# energy reward, to see what the trigger and the layout penalties do on their own
+TRIG_ONLY         = os.environ.get("TAMBOPT_TRIG_ONLY", "0") == "1"
+# TAMBOPT_UTIL_ZERO=1: the utility is 0 (kept in the graph): only the layout penalties (cable / construction) act
+UTIL_ZERO         = os.environ.get("TAMBOPT_UTIL_ZERO", "0") == "1"
+_TT_PARAMS = None
+
+
+def _two_tier_params():
+    global _TT_PARAMS
+    if _TT_PARAMS is None:
+        import json
+        if not TWO_TIER_CALIB:
+            raise RuntimeError("TAMBOPT_UTILITY=two_tier needs TAMBOPT_TWO_TIER_CALIB (calibration JSON)")
+        c = json.load(open(TWO_TIER_CALIB))
+        _TT_PARAMS = {k: float(c[k]) for k in ("theta_good", "e_good", "s_theta", "s_e", "theta_ref", "e_ref")}
+    return _TT_PARAMS
+
+
+def _sph(theta, phi):
+    return torch.stack([torch.sin(theta) * torch.cos(phi), torch.sin(theta) * torch.sin(phi),
+                        torch.cos(theta)], dim=-1)
+
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # repo root
+
+
+# ── Shared config (identical across all three 04 optimizers) ──────────────────
+# Utility composite weights — match 04_optimize.py
+W_THETA = 1e2
+W_PHI   = 1e2
+W_E     = 2.5e2
+W_PR    = 5e5
+W_DIV   = 1e3
+
+# Reconstructability thresholds.
+#
+# TODO(08): RE-TUNE THESE — they are calibrated for an electron+muon event and
+# are wrong now that photon is summed in. The distributions quoted below were
+# measured on a two-component corpus; the photon component carries roughly twice
+# the electron's points (measured 185,388 vs 94,059 over 23 events), so per-
+# detector counts rise substantially and both the "saw a particle" floor and the
+# detector-count midpoint sit in the wrong place. Concretely:
+#   - a DARK detector is still dark, so LAYOUT_THRESHOLD = 1.0 keeps its meaning,
+#     but a LIT one clears it far more easily, pushing the soft trigger count up
+#     and re-flattening `r` toward 1.0 — the exact failure the 5e-2 -> 1.0 change
+#     below was made to fix, arriving from the other direction
+#   - RECONSTRUCT_THRESHOLD (10.0 when this was written, 5.0 now) is a physical
+#     minimum, but TAU_RECONSTRUCT
+#     was chosen so the transition spans the *observed* spread of n; a shifted
+#     distribution narrows the fraction of events in the transition and drains
+#     the gradient again
+# Re-tuning needs the new trigger distribution in hand, so it follows the first
+# 08 corpus rather than preceding it: build the corpus, rerun
+# `plots/layouts/activation_counts.py` for the n percentiles, then reset these
+# the way the numbers below were originally set.
+# UNTIL THEN, U FROM 08 IS A NEW BASELINE and is not comparable to the ~33 of 07.
+#
+# 1.0 = "saw at least one particle". Do NOT lower it: at the old 5e-2 a DARK
+# detector scored sigmoid(5*(0-0.05)) = 0.44, flooring the count at ~44/100, so
+# r pinned at 1.0000 for every event and the term had zero gradient. At 1.0 a
+# dark detector gives 0.0067 and the count spans p10=13 / p50=48 / p90=82
+# (measured on the 07 e+mu corpus).
+LAYOUT_THRESHOLD      = 1.0
+# 10.0 -> 5.0: r is now half-on at 5 lit detectors, so an event is credited as
+# reconstructable on half the detector count it used to need. Two consequences
+# at the UNCHANGED tau below, both in the direction of less gradient:
+#   - the dark-layout floor rises, r(n=0) = sigmoid(-1) = 0.269 (was 0.119), so
+#     an event that triggers nothing is suppressed less in the theta/phi/E terms
+#   - saturation arrives sooner (n=20 -> 0.95, n=30 -> 0.99, was 0.88 / 0.98),
+#     shrinking the span of n that still discriminates between layouts
+# Lowering TAU_RECONSTRUCT alongside it would widen the transition back out;
+# left alone here because the request was the threshold alone.
+RECONSTRUCT_THRESHOLD = 5.0    # physical minimum detectors to reconstruct
+
+# tau_reconstruct=5.0 (the upstream default) makes r a step function: it swings
+# 0->1 within ~+-1 detector, so almost no event sits in the transition and the
+# term hands back no gradient. 0.2 spreads the transition over ~20 detectors
+# (at the current threshold 5: n=5 -> r=0.5, n=20 -> 0.95, n=30 -> 0.99; the
+# std ~0.20 across the population was measured at the old threshold 10).
+TAU_LAYOUT      = 5.0
+TAU_RECONSTRUCT = 0.2
+
+# Soft caps on the per-event 1/(err^2 + eps) reward. Sized from the measured
+# reward distribution (20k events, grid layout): well above each term's MEDIAN so
+# the bulk still discriminates, low enough to pull in the tail.
+#   term   median   top-5% share of U   -> with cap
+#   theta   218          14.5%             10.3%
+#   phi       7.8        49.2%             14.1%   (recon is poor at phi: median
+#   E        27.6        12.9%              9.3%    error 0.36 rad -> tighter cap)
+CAP_THETA = 500.0
+CAP_PHI   = 50.0
+CAP_E     = 80.0
+
+# GEOMETRY_PATH_RESOLVED is centralized in constants (mesh-agnostic: local copy of
+# the configured mesh, else the absolute path) and re-exported here for callers
+# (04 DE / DE-pop) that import it from optimize.objective.
+
+
+# ── Objective helpers ─────────────────────────────────────────────────────────
+def primary_to_physical_labels(primary: torch.Tensor):
+    """(B, >=4) -> (E_GeV, θ_rad, φ_rad). Inverse of `encode_primary`."""
+    # Normalise before reading the zenith off component z. arccos(dir_z) is the
+    # zenith angle only for a UNIT vector; the stored components are not
+    # guaranteed normalised, and clamping to [-1, 1] hides that rather than
+    # fixing it.
+    d = primary[:, 0:3]
+    d = d / d.norm(dim=1, keepdim=True).clamp(min=1e-12)
+    dir_x = d[:, 0]
+    dir_y = d[:, 1]
+    dir_z = d[:, 2].clamp(-1.0, 1.0)
+    log_e_norm = primary[:, 3]
+    log_e = log_e_norm * (LOG_E_MAX - LOG_E_MIN) + LOG_E_MIN
+    # Cap far outside the trained range (log10 E = 5-7) so 10^x stays finite: a recon fed an unusual layout once
+    # predicted log_e_norm = 30 (E = 1e65 -> inf in float32), and inf * 0 in the backward pass turned every
+    # gradient NaN (run 19 noise-aware Stage 4, centre starts). No effect on any finite, sane prediction.
+    log_e = log_e.clamp(min=0.0, max=20.0)
+    E_gev = torch.pow(10.0, log_e)
+    theta = torch.arccos(dir_z)
+    phi   = torch.atan2(dir_y, dir_x)
+    two_pi = 2.0 * math.pi
+    phi = torch.where(phi < 0, phi + two_pi, phi)
+    return E_gev, theta, phi
+
+
+# Off-mesh penalty (see offmesh_penalty). Weight is in units of U: one detector
+# sitting a full max_gap BEYOND the snap radius costs w/n_det, so at w=100 with
+# 100 detectors that is 1.0 U each — comfortably more than the ~1-2 U a chunk
+# gains by overfitting its batch, which is the trade the optimizer was making.
+OFFMESH_PENALTY_W = 100.0
+
+
+# Onset fraction of the snap radius. NOT 1.0, which was the first attempt
+# and measurably failed: a penalty that is flat inside the radius has zero
+# gradient there, so the only equilibrium is where its OUTWARD-growing
+# gradient finally matches the utility's outward pull — necessarily beyond
+# the radius (measured ~21 m beyond at w=100). Starting the wall inside
+# puts that balance point back in-band. The cost is that U is no longer
+# bit-identical to earlier runs for detectors sitting in the outer quarter
+# of the band; the alternative is a barrier that does not hold.
+PENALTY_ONSET_FRAC = 0.75
+
+# Excess (in units of r0) beyond which the penalty grows LINEARLY instead of
+# quadratically. Unbounded quadratic growth was the second failure: a
+# strong-Wolfe probe landing 400 km out produced a gradient ~4000x anything
+# physical, and although the probe was rejected, the curvature pair it fed into
+# L-BFGS's inverse-Hessian approximation made the following directions wilder
+# still (worst excursion grew from 797 m to 420,658 m). Beyond this the
+# gradient is constant, so a wild probe is expensive but not corrupting.
+PENALTY_LINEAR_AT = 1.0
+
+
+def offmesh_penalty(x_det: torch.Tensor, y_det: torch.Tensor,
+                    mesh_en: torch.Tensor, r0: float) -> torch.Tensor:
+    """Mean penalised excess distance beyond `r0` of the nearest mesh centroid.
+
+    Huber-shaped in the normalised excess u = (d - r0)/r0 — quadratic where the
+    optimizer works, linear far away so the far field cannot dominate. Normalised
+    by r0 and averaged over detectors, so the weight means the same thing at any
+    mesh scale or detector count.
+
+    Why it exists: U knows nothing about the mountain, and the snap to the mesh
+    runs under no_grad AFTER the step. Without this the optimizer hill-climbed the
+    surrogate's extrapolation up to 1272 m off-mesh, reporting U 36.2 -> 37.7 out
+    there; the end-of-chunk snap then collapsed it to 16.18.
+
+    `r0` is the ONSET radius (callers pass PENALTY_ONSET_FRAC * max_gap),
+    deliberately inside the snap radius. Tuning arithmetic: docs/THEORY.md §5.8.
+    """
+    d2 = ((x_det[:, None] - mesh_en[None, :, 0]) ** 2
+          + (y_det[:, None] - mesh_en[None, :, 1]) ** 2)
+    d = d2.min(dim=1).values.clamp_min(1e-12).sqrt()
+    u = (d - r0).clamp_min(0.0) / r0
+    a = PENALTY_LINEAR_AT
+    quad = u.clamp_max(a).pow(2)                  # u^2 up to the knee
+    lin = 2.0 * a * (u - a).clamp_min(0.0)        # constant slope past it
+    return (quad + lin).mean()
+
+
+def _apply_offmesh_penalty(U: torch.Tensor, parts: dict,
+                           x_det: torch.Tensor, y_det: torch.Tensor,
+                           mesh_en: Optional[torch.Tensor],
+                           penalty_w: float,
+                           penalty_r0: Optional[float]) -> torch.Tensor:
+    """Subtract the off-mesh penalty from `U`, recording both halves in `parts`.
+
+    A no-op returning `U` unchanged unless a mesh AND a positive weight are both
+    supplied, so callers that never pass them keep bit-identical numbers. Adds
+    "u_raw" (utility before the boundary cost) and "u_offmesh" to `parts` in
+    place and returns the PENALISED objective.
+    """
+    if mesh_en is None or penalty_w <= 0.0:
+        return U
+    r0 = penalty_r0 if penalty_r0 else 1.0
+    pen = penalty_w * offmesh_penalty(x_det, y_det, mesh_en, r0)
+    parts["u_raw"] = U          # utility before the boundary cost
+    parts["u_offmesh"] = -pen
+    return U - pen
+
+
+def _surrogate_predict(x_det: torch.Tensor,
+                       y_det: torch.Tensor,
+                       primary_batch: torch.Tensor,
+                       fnn,
+                       sample: bool = True):
+    """Broadcast one layout over a primary batch and run the dual surrogate.
+
+    Returns (xy_batch (B, n_det, 2), pred_ET (B, n_det, 2)) — the surrogate's
+    log-compressed (E, T) channels. Like its callers this is deliberately NOT
+    `@torch.no_grad()`-decorated and detaches nothing, so gradients reach
+    (x_det, y_det) through both per-species branches.
+    """
+    B = primary_batch.shape[0]
+    xy_per_det = torch.stack([x_det, y_det], dim=-1)                       # (n_det, 2)
+    xy_batch   = xy_per_det.unsqueeze(0).expand(B, -1, -1)                 # (B, n_det, 2)
+
+    # The surrogate is MEAN-ONLY, so there is nothing to sample: stage 2 no
+    # longer trains a variance head and `forward_sample` no longer exists (see
+    # modules/surrogates/deepsets.py). `sample` is kept in the signature because
+    # stage-4 scripts thread it through ~6 call sites, but it is now inert --
+    # and inert in the direction those scripts already chose, since
+    # 04_optimize_lbfgs_ensemble.py has had SAMPLE_SURROGATE = False all along.
+    #
+    # History, because the reasoning is worth keeping: this used to draw a fresh
+    # reparameterized (mean, var) sample per call so the recon input matched what
+    # recon trained on. A single-sample version was reverted in f9d688b
+    # (2026-07-28) after every Adam chain's "best" collapsed ~10 points on
+    # re-eval at PRIMARIES_PER_STEP=256; the batch has since grown to 5-50k, which
+    # would have averaged that noise out. It never got re-enabled, and the head it
+    # needed is now gone.
+    pred_ET = fnn(primary_batch, xy_batch)
+    return xy_batch, pred_ET
+
+
+def _predict_primary(x_det: torch.Tensor,
+                     y_det: torch.Tensor,
+                     primary_batch: torch.Tensor,
+                     fnn,
+                     recon,
+                     sample: bool = True):
+    """Layout -> dual surrogate -> recon -> physical primary labels.
+
+    Returns (E_pred_det, E_pred_phys, theta_pred, phi_pred): the surrogate's
+    per-detector E channel (log1p counts, what `reconstructability` expm1s) plus
+    the reconstructed primary decoded by `primary_to_physical_labels`.
+    """
+    xy_batch, pred_ET = _surrogate_predict(x_det, y_det, primary_batch, fnn, sample=sample)
+    E_pred_det = pred_ET[..., 0]
+    T_pred_det = pred_ET[..., 1]
+
+    recon_feats = torch.stack(
+        [xy_batch[..., 0], xy_batch[..., 1], E_pred_det, T_pred_det],
+        dim=-1,
+    )                                                                      # (B, n_det, 4)
+    pred = recon(recon_feats)                                              # (B, 4); DeepSets recon takes (B, n_det, 4)
+    E_pred_phys, theta_pred, phi_pred = primary_to_physical_labels(pred)
+    E_pred_phys = E_pred_phys.clamp(min=1.0)
+    return E_pred_det, E_pred_phys, theta_pred, phi_pred
+
+
+def utility_of_xy(x_det: torch.Tensor,
+                  y_det: torch.Tensor,
+                  primary_batch: torch.Tensor,
+                  fnn,
+                  recon,
+                  mesh_en: torch.Tensor = None,
+                  penalty_w: float = 0.0,
+                  penalty_r0: float = None,
+                  sample: bool = True):
+    """Composite U for an (East, North) layout against a primary batch.
+
+    Order-agnostic: the pair goes straight to the FNN + recon, both trained on the
+    same `xy` column order, so only consistency matters here, not axis meaning.
+
+    `fnn` is the dual-species wrapper — both per-species surrogates run on the same
+    primary + layout and combine physically, so gradients reach (x_det, y_det)
+    through BOTH. U_PR is computed but deliberately left out of the composite,
+    matching production.
+
+    NOT `@torch.no_grad()`-decorated, so L-BFGS can differentiate it; the DE
+    optimizers wrap their own calls instead.
+
+    `mesh_en` + `penalty_w` > 0 subtract the differentiable off-mesh penalty,
+    putting the mountain boundary inside the objective. OFF by default so existing
+    callers — notably plots/layouts/true_utility.py, which depends on scoring exactly
+    what the optimizer scored — get identical numbers. The returned U is the
+    PENALISED objective; raw utility and penalty are both in `parts`. With
+    r0 = max_gap a converged in-band layout has penalty exactly 0.
+
+    `sample` (default True, matching production/optimizer behavior) is passed
+    straight through to `_surrogate_predict`: set False when the caller needs
+    a deterministic reference to compare against (e.g.
+    plots/layouts/utility_vs_energy.py's per-event decomposition, which is
+    itself mean-based and would otherwise be checked against a different,
+    stochastic draw every call).
+    """
+    E_pred_det, E_pred_phys, theta_pred, phi_pred = _predict_primary(
+        x_det, y_det, primary_batch, fnn, recon, sample=sample)
+
+    E_true, theta_true, phi_true = primary_to_physical_labels(primary_batch)
+
+    r = reconstructability(
+        torch.expm1(E_pred_det),
+        layout_threshold=LAYOUT_THRESHOLD,
+        tau_layout=TAU_LAYOUT,
+        reconstruct_threshold=RECONSTRUCT_THRESHOLD,
+        tau_reconstruct=TAU_RECONSTRUCT,
+    )
+    if UTILITY_MODE == "three_tier":
+        a = angle_between_deg(_sph(theta_pred, phi_pred), _sph(theta_true, phi_true))
+        # soft "detected": detectors above 1 particle (tau 5), count soft-thresholded at 2.5 (tau 2): n = 2 -> 0.27,
+        # 3 -> 0.73, 4 -> 0.95
+        det = reconstructability(torch.expm1(E_pred_det), layout_threshold=LAYOUT_THRESHOLD, tau_layout=TAU_LAYOUT,
+                                 reconstruct_threshold=THREE_TIER_MIN_DET - 0.5, tau_reconstruct=2.0)
+        w1, w5, wd = THREE_TIER_W
+        u_tt, g1, g5 = U_three_tier(a, det, w1, w5, wd)
+        U = TWO_TIER_SCALE * u_tt
+        # parts slots reused for the level shares (x30): u_theta = U, u_phi = within 1, u_e = within 5, u_pr = detected
+        parts = dict(u_theta=U, u_phi=TWO_TIER_SCALE * g1.mean(), u_e=TWO_TIER_SCALE * g5.mean(),
+                     u_pr=TWO_TIER_SCALE * det.mean())
+        U = _apply_offmesh_penalty(U, parts, x_det, y_det, mesh_en, penalty_w, penalty_r0)
+        return U, r, parts
+    if UTILITY_MODE == "swgo_trigger":
+        from .counting import trigger_prob
+        from .background import AREA_M2
+        a = angle_between_deg(_sph(theta_pred, phi_pred), _sph(theta_true, phi_true))
+        e = (torch.log10(E_pred_phys) - torch.log10(E_true)).abs()
+        if TRIG_OFF:
+            rb = torch.ones_like(a)
+        else:
+            mu = getattr(fnn, "mu", None)
+            if mu is None:
+                raise RuntimeError("TAMBOPT_UTILITY=swgo_trigger needs a response with expected counts `mu` (Stage 4 "
+                                   "kernel)")
+            mu_a = mu * (TRIG_AREA_M2 / AREA_M2)
+            if TRIG_GATED:
+                gm = getattr(fnn, "gate_mask", None)
+                if gm is None:
+                    raise RuntimeError("TAMBOPT_TRIG_GATED=1 needs a gated response (--gate knn23)")
+                mu_a = mu_a * gm
+            if TRIG_MODE == "step":
+                rb = torch.sigmoid(5.0 * (torch.sigmoid(TRIG_SLOPE * (mu_a - TRIG_MU0)).sum(-1) - TRIG_K))
+            else:
+                rb = trigger_prob(mu_a, TRIG_K)
+        g = torch.sigmoid((TRIG_THETA - a) / TRIG_WIDTH)
+        q2 = (a / TRIG_QREF) ** 2
+        if TRIG_ENERGY:
+            g = g * torch.sigmoid((0.2 - e) / 0.05)
+            q2 = q2 + (e / 0.5) ** 2
+        u = rb if TRIG_ONLY else rb * (g + TWO_TIER_LAMBDA * (1.0 - g) / (1.0 + q2))
+        if UTIL_ZERO:
+            u = 0.0 * u
+        U = TWO_TIER_SCALE * u.mean()
+        # parts: u_theta = U, u_phi = trigger rate, u_e = triggered and good, u_pr = good (any trigger); all x30
+        parts = dict(u_theta=U, u_phi=TWO_TIER_SCALE * rb.mean(), u_e=TWO_TIER_SCALE * (rb * g).mean(),
+                     u_pr=TWO_TIER_SCALE * g.mean())
+        U = _apply_offmesh_penalty(U, parts, x_det, y_det, mesh_en, penalty_w, penalty_r0)
+        return U, rb, parts
+    if UTILITY_MODE == "two_tier":
+        p = _two_tier_params()
+        a = angle_between_deg(_sph(theta_pred, phi_pred), _sph(theta_true, phi_true))
+        e = (torch.log10(E_pred_phys) - torch.log10(E_true)).abs()
+        u_tt, g = U_two_tier(a, e, p["theta_good"], p["e_good"], p["s_theta"], p["s_e"],
+                             p["theta_ref"], p["e_ref"], TWO_TIER_LAMBDA)
+        U = TWO_TIER_SCALE * u_tt
+        zero = torch.zeros((), device=U.device)
+        parts = dict(u_theta=U, u_phi=zero, u_e=zero, u_pr=TWO_TIER_SCALE * g.mean())  # u_pr slot: good share
+        U = _apply_offmesh_penalty(U, parts, x_det, y_det, mesh_en, penalty_w, penalty_r0)
+        return U, r, parts
+    u_theta = U_angle(theta_pred, theta_true, r, cap=CAP_THETA)
+    u_phi   = U_angle(phi_pred,   phi_true,   r, cap=CAP_PHI,
+                      period=2.0 * math.pi)
+    u_e     = U_E    (E_pred_phys, E_true,    r, cap=CAP_E)
+    u_pr    = U_PR(r)
+    U = (W_THETA * u_theta + W_PHI * u_phi + W_E * u_e) / W_DIV
+    parts = dict(u_theta=W_THETA * u_theta / W_DIV, u_phi=W_PHI * u_phi / W_DIV,
+                 u_e=W_E * u_e / W_DIV, u_pr=W_PR * u_pr / W_DIV)
+    U = _apply_offmesh_penalty(U, parts, x_det, y_det,
+                               mesh_en, penalty_w, penalty_r0)
+    return U, r, parts
+
+
+# Divisor putting particles/shower into the same range as the composite U (~35).
+# The 04 optimizers assume an objective of order tens (OFFMESH_PENALTY_W is quoted
+# "in units of U", GRAD_CLIP=100), so an unscaled objective would swamp the
+# boundary penalty.
+#
+# Calibrated on the SURROGATE, not the kernel — that is what this objective reads.
+# Grid layout, 4000 corpus primaries:
+#     surrogate   1.98e4 particles/shower, 47.4 soft detectors
+#     kernel      3.77e5 particles/shower, 34.8 soft detectors
+# The surrogate is ~19x low on particles but ~36% high on detector count, so a
+# kernel-derived scale leaves the penalty ~19x overweight. 500 puts grid at ~40.
+# Pure rescale — cannot change which layout wins, but does set the
+# objective-to-penalty ratio.
+PARTICLE_SCALE = 500.0
+
+# PARTICLE_SCALE's counterpart for mode="distinct"; separate because the overlap
+# correction divides by m_d, so the two modes do not share a range.
+# MEASURED m_d (median over detectors): grid 1.61 (NN spacing 67 m vs sigma 50 m),
+# distinct-optimised 1.25 (NN spacing 120 m). At 100 the objective runs ~123-159,
+# i.e. ~3-4x above the U ~ 35 that OFFMESH_PENALTY_W is quoted against.
+# Left at 100: runs exist at this value and rescaling breaks comparison against
+# them. Revisit only alongside OFFMESH_PENALTY_W, never mid-experiment.
+DISTINCT_SCALE = 100.0
+
+
+def overlap_multiplicity(x_det: torch.Tensor, y_det: torch.Tensor,
+                         sigma: float = SIGMA_SPATIAL) -> torch.Tensor:
+    """Per-detector `m_d = sum_j exp(-r_dj^2 / (2 sigma^2))` (>= 1): how many
+    detectors' worth of kernel weight lands on the particles detector d sees.
+
+    Divides out the kernel's double-counting, so two coincident detectors give
+    m = 2 and half a count each and stacking gains nothing — the collapse
+    degeneracy is removed inside the objective, not fenced off by a penalty.
+
+    **Must be the kernel's OWN Gaussian, not an overlap integral.**
+    `exp(-r^2/(4 sigma^2))` looks natural but over-corrects by exactly 2x when
+    detectors are dense. Both limits of the form above are right; the derivation
+    is in docs/THEORY.md §5.7.
+
+    Assumes particle density is smooth over `sigma` — a shower core much narrower
+    than 50 m is over-corrected.
+    """
+    d2 = ((x_det[:, None] - x_det[None, :]) ** 2
+          + (y_det[:, None] - y_det[None, :]) ** 2)
+    return torch.exp(-d2 / (2.0 * sigma ** 2)).sum(dim=1)     # diagonal contributes 1
+
+
+def activation_of_xy(x_det: torch.Tensor,
+                     y_det: torch.Tensor,
+                     primary_batch: torch.Tensor,
+                     fnn,
+                     mode: str = "particles",
+                     mesh_en: Optional[torch.Tensor] = None,
+                     penalty_w: float = 0.0,
+                     penalty_r0: Optional[float] = None):
+    """How much a layout COLLECTS, differentiably — the activation objective.
+
+        counts    = expm1(fnn(primary, xy)[..., 0])       particles/detector
+        p         = sigmoid(TAU_LAYOUT * (counts - LAYOUT_THRESHOLD))
+        particles = counts.sum(1) / PARTICLE_SCALE
+        detectors = p.sum(1)                              soft trigger count
+        distinct  = (counts / m).sum(1) / DISTINCT_SCALE  m = overlap_multiplicity
+
+    `mode` picks which is maximized; all three land in `parts` either way.
+        particles  total flux — maximized EXACTLY by stacking on the densest
+                   point, since the kernel double-counts. Use only knowing that.
+        detectors  coverage; saturates at 1 each, so it pays to spread.
+        distinct   overlap-corrected flux: collection area, no stacking degeneracy.
+
+    **Surrogate-fed, so these numbers are NOT comparable to the kernel
+    evaluator's** — the two disagree ~19x on total particles (see PARTICLE_SCALE).
+    `plots/layouts/activation_counts.py` scoring held-out events is the honest check.
+
+    Contains no reconstruction term by design, so it is expected to disagree with
+    `utility_of_xy`. Returns (U, r, parts) so the ensemble machinery is a drop-in;
+    `r` is reported, not optimized.
+    """
+    if mode not in ("particles", "detectors", "distinct"):
+        raise ValueError("mode must be 'particles', 'detectors' or 'distinct', "
+                         f"got {mode!r}")
+    _, pred_ET = _surrogate_predict(x_det, y_det, primary_batch, fnn)
+    # clamp_min(0) matches dual.combine_species_outputs: a negative
+    # predicted count is not physical, and zeroing its gradient stops the optimizer
+    # chasing detectors into the surrogate's undershoot.
+    counts = torch.expm1(pred_ET[..., 0]).clamp_min(0.0)
+    p = torch.sigmoid(TAU_LAYOUT * (counts - LAYOUT_THRESHOLD))
+    n_soft = p.sum(dim=1)
+    particles = counts.sum(dim=1) / PARTICLE_SCALE
+    # Layout-only, so it is the same (n_det,) vector for every event in the batch.
+    m = overlap_multiplicity(x_det, y_det)
+    distinct = (counts / m[None, :]).sum(dim=1) / DISTINCT_SCALE
+    r = torch.sigmoid(TAU_RECONSTRUCT * (n_soft - RECONSTRUCT_THRESHOLD))
+
+    U = dict(particles=particles, detectors=n_soft, distinct=distinct)[mode].mean()
+    parts = dict(u_particles=particles.mean(), u_detectors=n_soft.mean(),
+                 u_distinct=distinct.mean(), u_pr=W_PR * U_PR(r) / W_DIV)
+    U = _apply_offmesh_penalty(U, parts, x_det, y_det,
+                               mesh_en, penalty_w, penalty_r0)
+    return U, r, parts
+
+
+# ── Ensemble bookkeeping ──────────────────────────────────────────────────────
+def assign(cost: np.ndarray) -> np.ndarray:
+    """One-to-one assignment minimizing total cost (Hungarian)."""
+    _, col = linear_sum_assignment(cost)
+    return col
+
+
+def align_to_reference(layouts_xy: np.ndarray, ref_idx: int):
+    """Permutation-invariant alignment of K layouts to a reference.
+
+    layouts_xy : (K, n_det, 2). For each run, solve the one-to-one assignment
+    minimizing total squared distance between its detectors and the reference
+    run's detectors, then reorder its detectors so column i of every run is the
+    same *physical position group* (not the same network input index).
+    Returns (aligned (K, n_det, 2), perms (K, n_det))."""
+    K, n_det, _ = layouts_xy.shape
+    ref = layouts_xy[ref_idx]
+    aligned = np.empty_like(layouts_xy)
+    perms = np.empty((K, n_det), dtype=np.int64)
+    for k in range(K):
+        if k == ref_idx:
+            aligned[k] = ref
+            perms[k] = np.arange(n_det)
+            continue
+        L = layouts_xy[k]
+        diff = ref[:, None, :] - L[None, :, :]      # (n_det, n_det, 2)
+        cost = (diff * diff).sum(axis=-1)           # (n_det, n_det)
+        col = assign(cost)
+        aligned[k] = L[col]
+        perms[k] = col
+    return aligned, perms
+
+
+def consecutive_cos_distance(grad_hist, window: int = 1) -> np.ndarray:
+    """Per-step cosine distance 1 - cos(g_t, g_{t-1}) between consecutive gradient
+    vectors, optionally W-step vector-averaged first to cancel zero-mean minibatch
+    noise before the (nonlinear) cosine. window=1 → raw, no averaging.
+
+    `grad_hist` is a sequence of flat gradient vectors (one per optimizer step).
+    Returns a 1-D array of length max(0, len(series) - 1)."""
+    if grad_hist is None or len(grad_hist) < 2:
+        return np.zeros(0)
+    G = np.asarray([np.asarray(g, dtype=np.float64).reshape(-1) for g in grad_hist])
+    if window and window > 1:
+        # Vector-average over a sliding window (valid mode) before the cosine.
+        kernel = np.ones(window) / window
+        G = np.stack([np.convolve(G[:, j], kernel, mode="valid")
+                      for j in range(G.shape[1])], axis=1)
+        if G.shape[0] < 2:
+            return np.zeros(0)
+    a = G[1:]
+    b = G[:-1]
+    num = (a * b).sum(axis=1)
+    den = np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1)
+    den = np.where(den > 0, den, 1.0)
+    return 1.0 - num / den
+
+
+# ── Model loading ─────────────────────────────────────────────────────────────
+def load_models(device, fnn_folder=None, recon_dir=None, with_fnn=True):
+    """Frozen dual-species surrogate + DeepSets recon from 03_train_recon_deepsets.py.
+
+    The dual wrapper combines fnn_electron.pt + fnn_muon.pt per event (frozen,
+    eval); gradients flow through both branches. `build_recon_from_ckpt` loads
+    whichever recon the checkpoint declares (DeepSets here, consuming
+    (B, n_det, 4) per-detector features: x, y, and a stochastic sample of
+    E/T drawn from the surrogate's predicted distribution), applies its
+    normalization, and freezes
+    it. Defaults: FNN_FOLDER and RECON_FOLDER + "_deepsets".
+
+    `with_fnn=False` loads the recon only and returns (None, recon): for runs
+    without a Stage-2 surrogate, scored on the kernel (score_layouts.py)."""
+    fnn_folder = fnn_folder or FNN_FOLDER
+    recon_dir  = recon_dir  or (RECON_FOLDER + "_deepsets")
+    fnn = load_dual_surrogate(fnn_folder, device) if with_fnn else None
+
+    recon_ckpt = torch.load(os.path.join(recon_dir, "recon.pt"),
+                            map_location=device, weights_only=False)
+    recon = build_recon_from_ckpt(recon_ckpt, N_DETECTORS, device)
+    print(f"[load] recon.pt  model={recon_ckpt.get('config', {}).get('model_type', 'mlp')}  "
+          f"epoch={recon_ckpt.get('epoch', '?')}  val={recon_ckpt.get('val_total', '?')}  <- {recon_dir}")
+    return fnn, recon

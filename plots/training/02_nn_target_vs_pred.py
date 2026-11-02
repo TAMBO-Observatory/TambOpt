@@ -1,0 +1,959 @@
+"""Target vs prediction scatter for the trained FNN and recon nets.
+
+Loads the cached corpus and the frozen checkpoints, evaluates each on its
+shower-level validation split, and plots target vs prediction against a 1:1 line.
+The recon runs on FNN-predicted (E, T) rather than ground truth, so its scatter
+shows end-to-end FNN -> recon error.
+
+    python plots/training/02_nn_target_vs_pred.py
+    python plots/training/02_nn_target_vs_pred.py --dual   # dual-species surrogate
+    python plots/training/02_nn_target_vs_pred.py --kernel-only  # only the *_kernel pair
+
+In --dual mode the FNN scatter is rendered PER SPECIES — each per-species DeepSets
+model against its own species-filtered subset (split on the Step-1 species_ids
+sidecar), since the corpus E/T ground truth is per-species. The recon scatter uses
+the combined DualSpeciesSurrogate on the full corpus, as Step 3 does. Outputs:
+
+    FNN_FOLDER/fnn_<species>_target_vs_pred.png
+    FNN_FOLDER/fnn_<species>_conditional.png    P(pred | target), hit-only
+    RECON_FOLDER_deepsets/recon_target_vs_pred.png
+    RECON_FOLDER_deepsets/recon_conditional.png
+
+**Read `*_conditional.png` for surrogate quality.** The joint hexbin in
+`*_target_vs_pred.png` is dominated by the dark-detector population (target = 0)
+and by the mean head being fitted to a stochastic target, so it understates the
+model; the conditional figure drops dark samples, normalises per target-column,
+and shows the compression as a slope.
+
+Recon folder: Step 3 writes to RECON_FOLDER + "_deepsets", so that is where
+--dual reads recon.pt and writes its scatter.
+"""
+import os
+import sys
+from collections import namedtuple
+
+# `_HERE` is this file's own directory; `_V6` the repo root, found by walking up
+# to the _pathfix.py marker instead of counting parents. Counting is what broke
+# the old plots/single_species/ scripts: written for plots/*.py, they resolved
+# the "repo root" to plots/ and could not import `modules` at all.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_V6 = _HERE
+while _V6 != os.path.dirname(_V6) and not os.path.exists(os.path.join(_V6, "_pathfix.py")):
+    _V6 = os.path.dirname(_V6)
+for _p in (_V6, _HERE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+# Font sizes, externalized (same convention as plots/lib/opt_plotting.py's FS_*) so a
+# caller can override them before rendering — e.g. 05_paper_figures.py scales
+# these up before calling in, to compensate for the large figsize LaTeX shrinks
+# back down to a fraction of \textwidth.
+FS_PANEL_TITLE      = 11   # _conditional_panel's per-channel title
+FS_LEGEND           = 8    # _scatter / _conditional_panel legends
+FS_SUPTITLE         = 12   # _render_fnn_conditional suptitle
+FS_SUPTITLE_SCATTER = 13   # _render_fnn_scatter / _render_recon_scatter suptitles
+
+# Figsizes, externalized the same way — 05_paper_figures.py overrides these
+# module globals (not the figsize= defaults baked into each function) before
+# calling in, so the drawn canvas can shrink or grow for the paper without
+# editing the render functions themselves.
+FIGSIZE_CONDITIONAL = (13, 5.6)    # _render_fnn_conditional
+FIGSIZE_SCATTER      = (10, 4.8)   # _render_fnn_scatter
+FIGSIZE_RECON        = (10, 10.6)  # _render_recon_scatter (2x2 grid)
+
+# Conditional-density band: p16/p84, the ±1σ interval of a Gaussian. Restored
+# after 31633e0 deleted the definition but kept its uses (NameError in every
+# *_conditional.png render since).
+SIGMA_QUANTILES = (0.16, 0.84)
+
+# Axis window: p99.9 of the target, not its max. A handful of extreme targets
+# would otherwise spend most of the axis on whitespace.
+AXIS_PERCENTILE = 99.9
+
+import torch
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+import modules  # noqa: F401 — package import; keeps modules on the path
+from modules.surrogates import FNNSurrogate
+from modules.constants import (
+    TRAINING_DATASET_FOLDER, FNN_FOLDER, RECON_FOLDER,
+    N_DETECTORS, PRIMARY_DIM, SPECIES_NAMES,
+)
+from modules.surrogates import build_recon_from_ckpt
+
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _savefig_multi(fig, output_path, dpi=130, formats=("png",)):
+    """Save `fig` under `output_path`'s basename once per extension in
+    `formats` (default: just whatever extension `output_path` already has,
+    unchanged behaviour for training-script callers). `05_paper_figures.py`
+    passes `formats=("png", "pdf")` so every paper figure ships as a
+    print-ready vector PDF alongside the PNG used for quick preview; hexbin
+    and imshow content still rasterizes fine inside a PDF (embedded as a
+    compressed image XObject, not per-point vector paths), so this doesn't
+    bloat file size for the density-heavy figures."""
+    base, ext = os.path.splitext(output_path)
+    if not formats:
+        formats = (ext.lstrip(".") or "png",)
+    for fmt in formats:
+        path = f"{base}.{fmt}"
+        fig.savefig(path, dpi=dpi, bbox_inches="tight")
+        print(f"[save] {path}")
+
+# 03_train_recon_deepsets.py writes to RECON_FOLDER + "_deepsets" (its line 50),
+# not RECON_FOLDER — that plain folder only exists for the older flat-MLP
+# 03_train_recon.py run.
+RECON_DEEPSETS_FOLDER = RECON_FOLDER + "_deepsets"
+
+# Seeds match 02_train_fnn.py and 03_train_recon.py
+FNN_VAL_SEED   = 0
+RECON_VAL_SEED = 1
+VAL_FRAC       = 0.10
+BATCH          = 1024
+
+# Mirror the log-T transform applied inside 02_train_fnn.py — the FNN was
+# trained with log1p(T * T_LOG_SCALE) as its canonical T target, so the ground-truth
+# T tensor must be passed through the same transform before the FNN scatter
+# is apples-to-apples.
+T_LOG_SCALE = 1.0e6
+
+
+def shower_level_val_idx(strategy_ids: torch.Tensor,
+                         val_frac: float,
+                         seed: int,
+                         species_ids: torch.Tensor = None) -> torch.Tensor:
+    """Reproduce the shower-level val indices used during training.
+
+    `species_ids=None` (default) reproduces the ORIGINAL formula, correct
+    when `strategy_ids` has already been filtered to one species (as the FNN
+    callers below do: they slice to a single species' rows before calling
+    this, so there is no species dimension left to collapse).
+
+    Passing `species_ids` fixes the same species-conflation bug
+    `03_train_recon_deepsets.py`'s `shower_level_split` has: on the FULL
+    multi-species corpus (rows strategy-major/species-major/event),
+    `n_showers = n_pairs // n_strat` alone silently treats (species, event)
+    as "shower" and can put one physical shower's species rows on both sides
+    of the val split. Recon's callers (which use the full corpus, not a
+    per-species slice) must pass it to get the SAME val set recon actually
+    trained/held out on, not just a similarly-sized one."""
+    n_pairs   = int(strategy_ids.shape[0])
+    n_strat   = int(strategy_ids.max().item() + 1)
+    n_species = int(species_ids.max().item() + 1) if species_ids is not None else 1
+    n_showers = n_pairs // (n_strat * n_species)
+
+    g = torch.Generator().manual_seed(int(seed))
+    perm = torch.randperm(n_showers, generator=g)
+    n_val = max(1, int(round(val_frac * n_showers)))
+
+    is_val = torch.zeros(n_showers, dtype=torch.bool)
+    is_val[perm[:n_val]] = True
+
+    all_idx = torch.arange(n_pairs, dtype=torch.long)
+    sp = species_ids if species_ids is not None else torch.zeros_like(strategy_ids)
+    shower_of_pair = all_idx - strategy_ids * (n_species * n_showers) - sp * n_showers
+    val_mask = is_val[shower_of_pair]
+    return torch.nonzero(val_mask).squeeze(-1)
+
+
+def _scatter(ax, x, y, title: str, vmin=None, vmax=None, lo=None, hi=None, legend: bool = True):
+    """Density-coloured target-vs-prediction panel.
+
+    Hexbin on a LINEAR colour scale clipped at the p95 occupied bin. Plain
+    linear is unusable here — counts span 1 to ~1e7, so the densest cell takes
+    the whole ramp and every other bin renders as one flat tone. Clipping the top
+    keeps equal count steps as equal colour steps (which LogNorm does not) while
+    letting the bulk occupy the range. `mincnt=1` leaves empty bins blank so the
+    y = x reference line stays readable.
+
+    `vmin` sets the bottom of the scale. `vmax` is accepted for call-site
+    compatibility but does NOT set the ceiling — the p95 clip always wins, so
+    the pinned values in FNN_DUAL_VLIM no longer fix the top of the scale."""
+    import numpy as np
+    from matplotlib.colors import Normalize
+    lo = 0.0 if lo is None else lo
+    hi = float(max(x.max(), y.max())) if hi is None else hi
+    hb = ax.hexbin(x, y, gridsize=80, cmap="viridis",
+                   norm=Normalize(vmin=vmin), mincnt=1, extent=(lo, hi, lo, hi))
+    counts = np.asarray(hb.get_array())
+    cb_label = "count"
+    if counts.size:
+        hb.set_clim(0.0 if vmin is None else float(vmin),
+                    float(np.percentile(counts, 95.0)))
+        # Say so on the bar, otherwise the saturated core reads as a real plateau.
+        cb_label = "count  (linear, clipped at p95)"
+    plt.colorbar(hb, ax=ax, label=cb_label, pad=0.02, fraction=0.046)
+    ax.plot([lo, hi], [lo, hi], color="red", linestyle="--", linewidth=2.0,
+            alpha=0.85, label="y = x")
+    ax.set_xlabel("target"); ax.set_ylabel("prediction")
+    ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
+    ax.set_title(title)
+    if legend:
+        ax.legend(loc="upper left", fontsize=FS_LEGEND, framealpha=1)
+
+
+BinnedProfile = namedtuple("BinnedProfile", "bin_center mean median p16 p84 count")
+
+
+def profile_by_bin(key, value, edges, min_count):
+    """Group `value` by which `edges` bin its `key` falls into; summarise each bin.
+
+    Returns a `BinnedProfile` whose arrays are already filtered to bins holding
+    at least `min_count` samples, so callers can plot them directly.
+
+    Implementation note: `np.bincount` gives the count and both sums in one pass
+    each, and accumulates in float64 — which a naive fp32 sum over the ~1e6
+    samples a single bin can hold would not. The two quantiles need order, so
+    one `lexsort` lays the values out grouped by bin and ascending within each
+    group, after which a quantile is a positional offset from the group's start.
+    """
+    import numpy as np
+
+    n_bins = edges.size - 1
+    bin_of = np.clip(np.digitize(key, edges[1:-1]), 0, n_bins - 1)
+
+    count = np.bincount(bin_of, minlength=n_bins)
+    divisor = np.maximum(count, 1)                      # empty bins -> 0/1 = 0
+    mean = np.bincount(bin_of, weights=value, minlength=n_bins) / divisor
+
+    ordered = value[np.lexsort((value, bin_of))]
+    group_start = np.concatenate(([0], np.cumsum(count)[:-1]))
+
+    def quantile(frac):
+        offset = (frac * np.maximum(count - 1, 0)).astype(np.intp)
+        # Empty bins can point one past the end; they are dropped by `keep`.
+        return ordered[np.minimum(group_start + offset, ordered.size - 1)]
+
+    lo_q, hi_q = SIGMA_QUANTILES
+    keep = count >= min_count
+    bin_center = 0.5 * (edges[:-1] + edges[1:])
+    return BinnedProfile(
+        bin_center=bin_center[keep],
+        mean=mean[keep],
+        median=quantile(0.5)[keep],
+        p16=quantile(lo_q)[keep],
+        p84=quantile(hi_q)[keep],
+        count=count[keep].astype(np.float64),
+    )
+
+
+def _draw_column_density(ax, target, pred, edges, min_count):
+    """Fill the panel with P(prediction | target), each column scaled to its peak.
+
+    Peak-scaling rather than sum-normalising: the conditional is sharp near
+    target = 0 and broad at high target, so dividing by the column sum lets one
+    column's spike take the whole colour ramp and washes the ridge out
+    everywhere else. Scaling to the peak puts every column on the same visual
+    footing, which is the point — the SHAPE of the conditional at each target,
+    not its height. Columns under `min_count` are left blank rather than
+    normalised from a handful of samples.
+    """
+    import numpy as np
+
+    lo, hi = edges[0], edges[-1]
+    # Predictions outside the window are clipped INTO the edge bins so no column
+    # loses mass before normalisation. Every statistic elsewhere uses unclipped
+    # values, so this affects the picture only.
+    joint, _, _ = np.histogram2d(target, np.clip(pred, lo, hi),
+                                 bins=(edges, edges))
+    populated = joint.sum(axis=1) >= min_count
+    density = np.full_like(joint, np.nan)
+    density[populated] = joint[populated] / np.maximum(
+        joint[populated].max(axis=1, keepdims=True), 1.0)
+
+    # .T because histogram2d indexes [x, y] while imshow wants [row, col].
+    im = ax.imshow(density.T, origin="lower", extent=(lo, hi, lo, hi),
+                   aspect="auto", cmap="viridis", interpolation="nearest")
+    plt.colorbar(im, ax=ax, label="P(prediction | target)", pad=0.02,
+                 fraction=0.046)
+
+
+def _draw_forward_conditional(ax, profile):
+    """Draw median-prediction-per-target-bin, its ±1σ band, and the y = x line.
+
+    Binned on the TARGET, which is the X axis — so the bin centre is the X
+    coordinate and every prediction statistic is a Y coordinate, and the calls
+    below read in the natural `(bin_center, statistic)` order. This is the same
+    conditioning the column-normalised image behind it uses, so the median curve
+    lands inside the bright ridge instead of cutting across it.
+    """
+    target_bin = profile.bin_center
+    pink = "#ff2d95"
+
+    ax.fill_between(target_bin, profile.p16, profile.p84,
+                    color=pink, alpha=0.15, zorder=3)
+    ax.plot(target_bin, profile.p16, color=pink, ls=":", lw=1.5, alpha=0.9,
+            zorder=4, label="±1σ  (p16 / p84 of prediction)")
+    ax.plot(target_bin, profile.p84, color=pink, ls=":", lw=1.5, alpha=0.9,
+            zorder=4)
+    ax.plot(target_bin, profile.median, color=pink, marker="s", ms=3.5, lw=2.2,
+            zorder=5, label="median prediction | target")
+
+    lo, hi = ax.get_xlim()
+    ax.plot([lo, hi], [lo, hi], color="red", ls="--", lw=2.0, alpha=0.9,
+            zorder=6, label="y = x")
+
+
+def _conditional_panel(ax, target, pred, channel: str,
+                       n_bins=60, min_count=200, legend: bool = True,
+                       hit_only: bool = True, lo=None, hi=None):
+    """One channel's conditional-density panel. Returns its stats for printing.
+
+    Hit detectors only (`target > 0`) WHEN `hit_only` is set — the default, for
+    the FNN's E/T channels, where most detector-samples are exactly dark and
+    that population answers a classification question, not a regression one, so
+    it is reported as a number instead of a blob. Pass `hit_only=False` for a
+    densely-populated target (e.g. the recon's continuous primary channels),
+    where every sample is a regression sample and none should be dropped.
+
+    `lo`/`hi` fix the axis window explicitly (recon channels don't share one
+    range — dir_z spans [0, 0.5] against dir_x/y/log_e_norm's [0, 1]). Left
+    None, the window is `[0, p99.9(target)]`, the FNN's original default.
+
+    Everything on the panel is the FORWARD conditional `prediction | target`:
+    the image is normalised per target-column, and the curve, band and slope are
+    all binned on the target. One conditioning throughout, so the mean curve sits
+    inside the bright ridge rather than cutting across it.
+
+    DO NOT READ THE SLOPE AGAINST 1.00. This direction conditions on a noisy
+    realisation of the target while the net is fitted to `E[y | input]`, so
+    regression attenuation holds the slope below 1 however good the model is;
+    calling the gap to 1.00 "compression" over-accuses the model.
+
+    The reference it IS read against is measured, never claimed. Writing
+    `target = f + ε` and `pred = m`, `Cov(m, t) = Cov(m, f)`, so a perfect
+    conditional mean `m = f` satisfies `Cov(pred, target) = Var(pred)` exactly —
+    at any noise level, with no appeal to the model's own σ. That gives
+
+        expected slope = Var(pred) / Var(target)
+        bias ratio     = Cov(pred, target) / Var(pred)     (ideal 1.00)
+
+    both from measured moments alone.
+
+    MEDIAN, not mean: the conditional is strongly right-skewed in log1p space
+    near zero, and the median follows the bright ridge the image shows, where a
+    few large predictions pull the mean off it. The MSE head fits the mean, so
+    the two curves can differ where the conditional is skewed.
+
+    Only the slope and its expected value reach the title; the rest goes to
+    stdout via the caller.
+    """
+    import numpy as np
+
+    if hit_only:
+        keep = target > 0.0
+        target, pred = target[keep], pred[keep]       # rebind: hits only below
+        hit_frac = float(keep.mean())
+    else:
+        hit_frac = 1.0
+    if target.size < 10 * n_bins:
+        ax.set_title(f"{channel}: too few samples ({target.size})")
+        return None
+
+    # x and y MUST share this one (lo, hi) window: _draw_column_density clips
+    # pred into it before histogramming (np.clip(pred, lo, hi)), so any point
+    # outside already lands in the edge row/column of the image. A wider ylim
+    # here previously left that region blank -- the image has no data to show
+    # there -- while the clipped mass still piled onto a bright line at y=lo,
+    # which read as a fake density stripe sitting above an empty gap.
+    lo = 0.0 if lo is None else lo
+    hi = float(np.percentile(target, AXIS_PERCENTILE)) if hi is None else hi
+    edges = np.linspace(lo, hi, n_bins + 1)
+    ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
+
+    _draw_column_density(ax, target, pred, edges, min_count)
+    profile = profile_by_bin(key=target, value=pred,
+                             edges=edges, min_count=min_count)
+    _draw_forward_conditional(ax, profile)
+
+    # # sqrt(count) weights so sparse high-target bins do not drive the fit.
+    # slope = float(np.polyfit(profile.bin_center, profile.mean, 1,
+    #                          w=np.sqrt(profile.count))[0]) \
+    #     if profile.bin_center.size > 1 else float("nan")
+    # # Measured moments over every hit sample — no windowing, no binning, and
+    # # nothing the model asserts about itself. See the docstring for the identity.
+    # t64, p64 = target.astype(np.float64), pred.astype(np.float64)
+    # var_t, var_p = float(np.var(t64)), float(np.var(p64))
+    # cov = float(np.mean((t64 - t64.mean()) * (p64 - p64.mean())))
+    # expected_slope = var_p / max(var_t, 1e-12)
+    # bias_ratio = cov / max(var_p, 1e-12)
+    # Half the p16-p84 gap: the spread of the model's output at a fixed truth.
+    band_sigma = float(np.median(0.5 * (profile.p84 - profile.p16)))
+
+    ax.set_xlabel("target"); ax.set_ylabel("prediction")
+    ax.set_title(channel, fontsize=FS_PANEL_TITLE)
+    if legend:
+        ax.legend(loc="upper left", fontsize=FS_LEGEND, framealpha=0.9)
+    return dict(hit_frac=hit_frac, n_hit=int(target.size),
+                band_sigma=band_sigma)
+
+
+Channel = namedtuple("Channel", "tag label target pred")
+
+
+def _render_fnn_conditional(fnn, primary, xy, E_true, T_true, val_idx,
+                            output_path, formats=("png",)):
+    """Conditional-density figure, one panel per channel, plus its stdout report.
+
+    Companion to `_render_fnn_scatter`, which shows the same data as a joint
+    density dominated by the dark-detector population. Needs no variance head:
+    every reference on this figure comes from measured moments (see
+    `_conditional_panel`), so it renders identically for a mean-only checkpoint.
+    The surrogate is mean-only, so there is no predicted σ to test."""
+    p, x = primary[val_idx], xy[val_idx]
+    E_pred, T_pred = (a.flatten().numpy() for a in fnn_predict(fnn, p, x))
+    channels = (
+        Channel("E", "log1p(E)", E_true[val_idx].flatten().numpy(), E_pred),
+        Channel("T", f"log1p(T·{T_LOG_SCALE:.0e})", T_true[val_idx].flatten().numpy(), T_pred),
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=FIGSIZE_CONDITIONAL)
+    stats = {ch.tag: _conditional_panel(ax, ch.target, ch.pred, ch.label, legend=False)
+             for ax, ch in zip(axes, channels)}
+
+    n_samples = channels[0].target.size
+    hit_txt = f"{100 * stats['E']['hit_frac']:.0f}% of " if stats["E"] else ""
+    fig.suptitle(f"Conditional density ({hit_txt}{n_samples:,})", fontsize=FS_SUPTITLE)
+    handles, labels = next(
+        (ax.get_legend_handles_labels() for ax in axes if ax.get_legend_handles_labels()[1]),
+        ([], []))
+    if labels:
+        fig.legend(handles, labels, loc="lower center", fontsize=FS_LEGEND,
+                  ncol=len(labels), bbox_to_anchor=(0.5, -0.1))
+    # rect's bottom=0.1 leaves headroom below the axes' own xlabel ("target")
+    # for the legend two lines below it; bbox_to_anchor alone isn't enough --
+    # tight_layout has no idea a legend exists outside the axes it's fitting.
+    fig.tight_layout(rect=(0, 0.1, 1, 0.92))
+    _savefig_multi(fig, output_path, dpi=130, formats=formats)
+    plt.close(fig)
+
+    _print_conditional_stats(stats, channels[0].target, E_pred)
+
+
+def _print_conditional_stats(stats, E_target, E_pred):
+    """Everything computed for the figure that did not earn ink on it."""
+    import numpy as np
+
+    # The dark/lit split as the classification it is, at the count >= 1 cut that
+    # LAYOUT_THRESHOLD gates the trigger on. E only — a count threshold is
+    # meaningless for a time.
+    cut = np.log1p(1.0)
+    true_lit, pred_lit = E_target >= cut, E_pred >= cut
+    print(f"       [E, count>=1] true lit {100 * true_lit.mean():.2f}%  "
+          f"pred lit {100 * pred_lit.mean():.2f}%  "
+          f"agree {100 * (true_lit == pred_lit).mean():.2f}%  "
+          f"recall {100 * (pred_lit & true_lit).sum() / max(true_lit.sum(), 1):.2f}%")
+
+    for tag, st in stats.items():
+        if st is None:
+            continue
+        print(f"       [{tag}] hit {100 * st['hit_frac']:.2f}% "
+              f"(n={st['n_hit']:,})  1σ band {st['band_sigma']:.3f}")
+
+
+def load_fnn() -> FNNSurrogate:
+    # Read width + dropout from the saved config and prefer the FNN's own
+    # norm_stats (02_train_fnn.py updates the T slots in-memory for log-T
+    # training and ships the modified stats inside fnn.pt; disk norm_stats.pt
+    # still holds raw-T values).
+    fnn_ckpt = torch.load(os.path.join(FNN_FOLDER, "fnn.pt"), map_location=DEVICE)
+    cfg = fnn_ckpt.get("config", {})
+    fnn = FNNSurrogate(
+        n_det=N_DETECTORS, primary_dim=PRIMARY_DIM,
+        hidden=int(cfg.get("hidden", 512)),
+        dropout=float(cfg.get("dropout", 0.1)),
+    ).to(DEVICE)
+    fnn.load_state_dict(fnn_ckpt["state_dict"])
+    norm_stats = fnn_ckpt.get(
+        "norm_stats",
+        torch.load(os.path.join(TRAINING_DATASET_FOLDER, "norm_stats.pt")),
+    )
+    fnn.set_normalization(norm_stats)
+    fnn.eval()
+    print(f"[load] fnn.pt  epoch={fnn_ckpt.get('epoch','?')}  "
+          f"val={fnn_ckpt.get('val_total','?')}  "
+          f"hidden={int(cfg.get('hidden', 512))} "
+          f"lbfgs_iter={fnn_ckpt.get('lbfgs_iter','?')}")
+    return fnn
+
+
+@torch.no_grad()
+def fnn_predict(fnn: FNNSurrogate,
+                primary: torch.Tensor,
+                xy: torch.Tensor):
+    N = primary.shape[0]
+    E_pred = torch.empty((N, N_DETECTORS), dtype=torch.float32)
+    T_pred = torch.empty((N, N_DETECTORS), dtype=torch.float32)
+    for lo in range(0, N, BATCH):
+        hi = min(lo + BATCH, N)
+        pred = fnn(primary[lo:hi].to(DEVICE), xy[lo:hi].to(DEVICE))
+        E_pred[lo:hi] = pred[..., 0].cpu()
+        T_pred[lo:hi] = pred[..., 1].cpu()
+    return E_pred, T_pred
+
+
+def load_recon(folder: str = RECON_DEEPSETS_FOLDER):
+    """Mirror of load_fnn() for the recon checkpoint. Used by the standalone
+    CLI path; training scripts pass an already-trained recon in.
+
+    Dispatches on the checkpoint's own config["model_type"] via
+    build_recon_from_ckpt, so flat-MLP ("mlp") and DeepSets ("deepsets")
+    checkpoints both load. Hardcoding Reconstruction here predated
+    03_train_recon_deepsets.py and died on a state_dict shape mismatch
+    against its checkpoints."""
+    recon_ckpt = torch.load(os.path.join(folder, "recon.pt"),
+                            map_location=DEVICE, weights_only=False)
+    recon = build_recon_from_ckpt(recon_ckpt, N_DETECTORS, DEVICE)
+    print(f"[load] {folder}/recon.pt  "
+          f"model={recon_ckpt.get('config', {}).get('model_type', 'mlp')}  "
+          f"epoch={recon_ckpt.get('epoch','?')}  "
+          f"val={recon_ckpt.get('val_total','?')} "
+          f"lbfgs_iter={recon_ckpt.get('lbfgs_iter','?')}")
+    return recon
+
+
+# --------------------------------------------------------------------------- #
+# Per-species loading. Mirrors 02_train_fnn_deepsets.py (per-species FNN) and
+# 03_train_recon.py (combined surrogate for recon).
+# --------------------------------------------------------------------------- #
+# (tag, species id), id = index into constants.SPECIES_NAMES.
+SPECIES_TAGS = tuple((name, i) for i, name in enumerate(SPECIES_NAMES))
+
+
+def load_species_fnn(species: str):
+    """Load one per-species surrogate (fnn_<species>.pt) from
+    FNN_FOLDER. Uses build_surrogate_from_ckpt so flat-MLP or DeepSets configs
+    both work, with the checkpoint's own per-species norm stats applied."""
+    from modules.surrogates import build_surrogate_from_ckpt
+    path = os.path.join(FNN_FOLDER, f"fnn_{species}.pt")
+    ckpt = torch.load(path, map_location=DEVICE, weights_only=False)
+    fnn = build_surrogate_from_ckpt(ckpt, N_DETECTORS, PRIMARY_DIM, DEVICE)
+    cfg = ckpt.get("config", {})
+    print(f"[load] fnn_{species}.pt  model={cfg.get('model_type', 'fnn')}  "
+          f"epoch={ckpt.get('epoch', '?')}  val={ckpt.get('val_total', '?')}")
+    return fnn
+
+
+def _render_fnn_scatter(fnn, primary, xy, E_true, T_true, val_idx, output_path,
+                        vmin_E=10, vmax_E=4000, vmin_T=10, vmax_T=2500,
+                        formats=("png",)):
+    """Pure rendering — no I/O for models or corpus. Caller supplies a loaded
+    FNN in eval mode plus the in-memory tensors. T_true must already be
+    log1p(T*T_LOG_SCALE)-transformed (matching what the FNN was trained against).
+    vmin/vmax_{E,T} pin each panel's hexbin colour (count) scale (per species)."""
+    p   = primary[val_idx]
+    x   = xy[val_idx]
+    E_t = E_true[val_idx]
+    T_t = T_true[val_idx]
+    E_p, T_p = fnn_predict(fnn, p, x)
+
+    fig, axes = plt.subplots(1, 2, figsize=FIGSIZE_SCATTER)
+    _scatter(axes[0], E_t.flatten().numpy(), E_p.flatten().numpy(),
+             f"log1p(E)",
+             vmin=vmin_E, vmax=vmax_E, legend=False)
+    _scatter(axes[1], T_t.flatten().numpy(), T_p.flatten().numpy(),
+             f"log1p(T·{T_LOG_SCALE:.0e})",
+             vmin=vmin_T, vmax=vmax_T, legend=False)
+    fig.suptitle(f"Target vs prediction (N={T_t.numel():,})", fontsize=FS_SUPTITLE_SCATTER)
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", fontsize=FS_LEGEND,
+              ncol=len(labels), bbox_to_anchor=(0.5, -0.08))
+    # bottom=0.08 leaves headroom below the axes' own xlabel for the legend
+    # -- tight_layout does not know a legend sits outside the axes it fits.
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
+    _savefig_multi(fig, output_path, dpi=130, formats=formats)
+    plt.close(fig)
+
+
+# Shared by every recon render: (label, axis lo, axis hi) per primary channel.
+# dir_x/dir_y are direction cosines and span [-1, 1]; dir_z spans [-0.5, 0.5]
+# (half the others' -- see place_clouds_enu / the v6 primary encoding for why).
+# log_e_norm's TARGET is bounded to [0, 1] BY CONSTRUCTION (encode_primary's
+# (log10(E) - LOG_E_MIN)/(LOG_E_MAX - LOG_E_MIN)), so its window is [0, 1] too --
+# unlike dir_x/y/z, [0, 1] is log_e_norm's real physical range, not an
+# arbitrary choice. The PREDICTION still overshoots slightly past both ends
+# (measured down to about -0.5); that overshoot is real model behaviour and
+# is worth its own diagnostic, but is deliberately NOT what sets this axis --
+# widening the window to fit an overshooting prediction would treat the
+# window as "whatever the model happened to output" rather than the channel's
+# actual domain, which is the same mistake the original lo=0.0-everywhere
+# version made in the other direction.
+#
+# An earlier version of this tuple used lo=0.0 for dir_x/y/z too, copied from
+# the pre-existing (also wrong) implicit lo=0 in the plain scatter's hexbin
+# calls below -- that silently dropped every negative-target/prediction point
+# (hexbin ignores anything outside its extent), invisible as whitespace in a
+# scatter but a false bright spike in the conditional panel, whose column
+# density clips out-of-window values into the edge bin instead of dropping
+# them. Measured fractions of negative PREDICTIONS at that old lo=0 window:
+# dir_x 63.8%, dir_z 33.7%, log_e_norm 7.4%, dir_y 3.1% of N=572,165 -- real
+# recon outputs in a real negative-valued domain (dir_x/y/z), not a defect.
+RECON_CHANNELS = (("dir_x", -1.0, 1.0), ("dir_y", -1.0, 1.0),
+                  ("dir_z", -0.5, 0.5), ("log_e_norm", 0.0, 1.0))
+
+
+def _recon_target_pred(fnn, recon, primary, xy, val_idx):
+    """(target, pred, N) for the recon channels — the shared data prep behind
+    every recon figure. Target = v6 primary encoding [dir_x, dir_y, dir_z,
+    log_e_norm] in raw units; recon runs on FNN-PREDICTED (E, T), not ground
+    truth, same as 04_optimize, so this reflects the end-to-end FNN -> recon
+    error."""
+    p = primary[val_idx]
+    x = xy[val_idx]
+    E_pred, T_pred = fnn_predict(fnn, p, x)
+    target = p[:, :4].float()
+
+    N = p.shape[0]
+    pred = torch.empty((N, 4), dtype=torch.float32)
+    with torch.no_grad():
+        for lo in range(0, N, BATCH):
+            hi = min(lo + BATCH, N)
+            xy_b = x[lo:hi].to(DEVICE)
+            E_b  = E_pred[lo:hi].to(DEVICE)
+            T_b  = T_pred[lo:hi].to(DEVICE)
+            feats = torch.stack([xy_b[..., 0], xy_b[..., 1], E_b, T_b], dim=-1)  # (B, n_det, 4)
+            pred[lo:hi] = recon(feats).cpu()                                     # DeepSets recon takes (B, n_det, 4)
+    return target, pred, N
+
+
+def _draw_recon_scatter(target, pred, N, output_path, formats=("png",),
+                        title_suffix=""):
+    """Shared 2x2 scatter grid over RECON_CHANNELS, given already-computed
+    (target, pred). Both `_render_recon_scatter` (FNN-fed) and
+    `_render_recon_scatter_kernel` (kernel-fed) draw through this so the two
+    figures are visually identical apart from their data source."""
+    vmin_s = (1, 1, 1, 1)
+    # vmax_s = (100, 100, 100, 200)
+    vmax_s = (80, 200, 200, 200)
+    # vmax_s = (200, 300, 300, 500)
+    # 2x2, not 1x4: four panels side by side left each column too narrow at
+    # print size for its own title next to the suptitle above it.
+    fig, axes = plt.subplots(2, 2, figsize=FIGSIZE_RECON)
+    for ax, i, (name, lo, hi) in zip(axes.flat, range(4), RECON_CHANNELS):
+        _scatter(ax, target[:, i].numpy(), pred[:, i].numpy(), f"Recon  {name}",
+                vmin=vmin_s[i], vmax=vmax_s[i], lo=lo, hi=hi, legend=False)
+    fig.suptitle(f"Recon: target vs prediction{title_suffix} (N={N:,})",
+                fontsize=FS_SUPTITLE_SCATTER)
+    handles, labels_leg = axes.flat[0].get_legend_handles_labels()
+    fig.legend(handles, labels_leg, loc="lower center", fontsize=FS_LEGEND,
+              ncol=len(labels_leg), bbox_to_anchor=(0.5, -0.04))
+    # top=0.94 reserves headroom for the suptitle above the top row's own
+    # panel titles; bottom=0.06 leaves headroom below the bottom row's xlabel
+    # for the legend -- tight_layout does not know a legend sits outside the
+    # axes it fits, nor does it budget for the suptitle unless told to.
+    fig.tight_layout(rect=(0, 0.06, 1, 0.94))
+    _savefig_multi(fig, output_path, dpi=130, formats=formats)
+    plt.close(fig)
+
+
+def _draw_recon_conditional(target, pred, N, output_path, formats=("png",),
+                            title_suffix=""):
+    """Shared conditional-density grid, same peak-scaled-column-density +
+    mean/±1σ-band treatment as `_render_fnn_conditional` (see
+    `_conditional_panel`), applied to the 4 recon channels.
+
+    `hit_only=False` throughout: unlike the FNN's per-detector E/T, every recon
+    target here is a dense, continuous primary-encoding value — there is no
+    dark/hit population to split out, so nothing is filtered before binning."""
+    fig, axes = plt.subplots(2, 2, figsize=FIGSIZE_RECON)
+    for ax, i, (name, lo, hi) in zip(axes.flat, range(4), RECON_CHANNELS):
+        _conditional_panel(ax, target[:, i].numpy(), pred[:, i].numpy(),
+                           f"Recon  {name}", legend=False,
+                           hit_only=False, lo=lo, hi=hi)
+    fig.suptitle(f"Recon: conditional density{title_suffix} (N={N:,})",
+                fontsize=FS_SUPTITLE_SCATTER)
+    handles, labels_leg = axes.flat[0].get_legend_handles_labels()
+    fig.legend(handles, labels_leg, loc="lower center", fontsize=FS_LEGEND,
+              ncol=len(labels_leg), bbox_to_anchor=(0.5, -0.04))
+    fig.tight_layout(rect=(0, 0.06, 1, 0.94))
+    _savefig_multi(fig, output_path, dpi=130, formats=formats)
+    plt.close(fig)
+
+
+def _render_recon_scatter(fnn, recon, primary, xy, val_idx, output_path, formats=("png",)):
+    """Pure rendering — caller supplies both nets (eval mode) and the
+    in-memory primary/xy tensors. Recon target is `primary[val_idx, :4]`."""
+    target, pred, N = _recon_target_pred(fnn, recon, primary, xy, val_idx)
+    _draw_recon_scatter(target, pred, N, output_path, formats=formats)
+
+
+def _render_recon_conditional(fnn, recon, primary, xy, val_idx, output_path,
+                              formats=("png",)):
+    """Conditional-density companion to `_render_recon_scatter`."""
+    target, pred, N = _recon_target_pred(fnn, recon, primary, xy, val_idx)
+    _draw_recon_conditional(target, pred, N, output_path, formats=formats)
+
+
+def _recon_target_pred_kernel(recon, primary, xy, val_idx):
+    """(target, pred, N) for recon fed the REAL Step-1 kernel labels as its
+    (E, T) input, instead of `_recon_target_pred`'s surrogate-predicted ones.
+
+    `_recon_target_pred` reflects end-to-end FNN -> recon error (what Stage 4
+    actually inherits, since it also reads through the surrogate); this
+    reflects recon's OWN reconstruction quality against ground-truth physics,
+    decoupled from any surrogate error -- the honest "how good is recon,
+    period" number, and the one comparable to Part A's analytic-reconstruction
+    baseline in docs/stage3-analytic-validation.md.
+
+    `load_kernel_responses` lives in `03_train_recon_deepsets.py`, which
+    starts with a digit and so cannot be `import`ed by name -- loaded by
+    path, the same trick `04_optimize_lbfgs_kernel.py` uses for
+    `04_analytic_recon.py`. It returns E/T already combined across species and
+    row-aligned with primary.pt/xy.pt, so it's indexable by the same val_idx."""
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location(
+        "_s3_recon", os.path.join(_V6, "scripts", "03_train_recon_deepsets.py"))
+    _s3 = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_s3)
+
+    E_kern, T_kern = _s3.load_kernel_responses(TRAINING_DATASET_FOLDER)
+
+    p = primary[val_idx]
+    x = xy[val_idx]
+    E_v = E_kern[val_idx]
+    T_v = T_kern[val_idx]
+    target = p[:, :4].float()
+
+    N = p.shape[0]
+    pred = torch.empty((N, 4), dtype=torch.float32)
+    with torch.no_grad():
+        for lo in range(0, N, BATCH):
+            hi = min(lo + BATCH, N)
+            xy_b = x[lo:hi].to(DEVICE)
+            E_b  = E_v[lo:hi].to(DEVICE)
+            T_b  = T_v[lo:hi].to(DEVICE)
+            feats = torch.stack([xy_b[..., 0], xy_b[..., 1], E_b, T_b], dim=-1)  # (B, n_det, 4)
+            pred[lo:hi] = recon(feats).cpu()
+    return target, pred, N
+
+
+def _load_corpus():
+    """Load shared tensors + strategy ids. Applies log1p(T*T_LOG_SCALE) so T_true
+    matches the FNN's training target space (see 02_train_fnn.py).
+
+    Only used by the standalone CLI / when training scripts call into the
+    plotters without providing their already-loaded tensors."""
+    primary   = torch.load(os.path.join(TRAINING_DATASET_FOLDER, "primary.pt")).float()
+    xy        = torch.load(os.path.join(TRAINING_DATASET_FOLDER, "xy.pt")).float()
+    E_true    = torch.load(os.path.join(TRAINING_DATASET_FOLDER, "E.pt")).float()
+    T_true    = torch.load(os.path.join(TRAINING_DATASET_FOLDER, "T.pt")).float()
+    strat_ids = torch.load(os.path.join(TRAINING_DATASET_FOLDER, "strategy_ids.pt")).long()
+    T_true = torch.log1p(T_true * T_LOG_SCALE)
+    return primary, xy, E_true, T_true, strat_ids
+
+
+def plot_fnn_only(*, fnn=None,
+                  primary=None, xy=None,
+                  E_true=None, T_true=None,
+                  val_idx=None,
+                  species=None,
+                  output_path=None):
+    """Render fnn_target_vs_pred.png. Every argument is optional: anything
+    left as None gets loaded from disk so the standalone CLI still works.
+
+    Training-script callers (02_train_fnn.py) pass everything they already
+    have in memory — fnn (with best weights reloaded), primary, xy, E_all,
+    T_all (already log1p-transformed in 02), val_idx — and no disk I/O for
+    the corpus is performed. T_true MUST be in log-T space if provided.
+
+    `species` ("electron"/"muon") selects the per-species hexbin colour
+    scale from FNN_DUAL_VLIM; left None it falls back to the generic
+    _render_fnn_scatter defaults.
+    """
+    if primary is None or xy is None or E_true is None or T_true is None:
+        primary, xy, E_true, T_true, strat_ids_disk = _load_corpus()
+    else:
+        strat_ids_disk = None
+    if val_idx is None:
+        if strat_ids_disk is None:
+            strat_ids_disk = torch.load(
+                os.path.join(TRAINING_DATASET_FOLDER, "strategy_ids.pt")
+            ).long()
+        val_idx = shower_level_val_idx(strat_ids_disk, VAL_FRAC, FNN_VAL_SEED)
+    if fnn is None:
+        fnn = load_fnn()
+    if output_path is None:
+        os.makedirs(FNN_FOLDER, exist_ok=True)
+        output_path = os.path.join(FNN_FOLDER, "fnn_target_vs_pred.png")
+    _render_fnn_scatter(fnn, primary, xy, E_true, T_true, val_idx, output_path,
+                        **FNN_DUAL_VLIM.get(species, {}))
+    base, ext = os.path.splitext(output_path)
+    # Needs no variance head — the σ band is optional inside the panel.
+    _render_fnn_conditional(
+        fnn, primary, xy, E_true, T_true, val_idx,
+        base.replace("target_vs_pred", "conditional") + ext)
+
+
+def plot_recon_only(*, fnn=None, recon=None,
+                    primary=None, xy=None,
+                    val_idx=None,
+                    output_path=None,
+                    recon_folder=RECON_DEEPSETS_FOLDER,
+                    formats=("png",)):
+    """Render recon_target_vs_pred.png. Like `plot_fnn_only`, every argument
+    is optional. Training-script callers (03_train_recon.py) pass fnn +
+    recon (best weights reloaded) + primary + xy + val_idx; no disk I/O for
+    those is then performed.
+
+    `recon_folder` is where a None `recon` is loaded from and where a None
+    `output_path` lands — keep the checkpoint and its scatter in the same
+    run folder."""
+    if primary is None or xy is None:
+        primary, xy, _E, _T, strat_ids_disk = _load_corpus()
+    else:
+        strat_ids_disk = None
+    if val_idx is None:
+        if strat_ids_disk is None:
+            strat_ids_disk = torch.load(
+                os.path.join(TRAINING_DATASET_FOLDER, "strategy_ids.pt")
+            ).long()
+        species_ids_disk = torch.load(
+            os.path.join(TRAINING_DATASET_FOLDER, "species_ids.pt")
+        ).long()
+        val_idx = shower_level_val_idx(strat_ids_disk, VAL_FRAC, RECON_VAL_SEED,
+                                       species_ids=species_ids_disk)
+    if fnn is None:
+        fnn = load_fnn()
+    if recon is None:
+        recon = load_recon(recon_folder)
+    if output_path is None:
+        os.makedirs(recon_folder, exist_ok=True)
+        output_path = os.path.join(recon_folder, "recon_target_vs_pred.png")
+    _render_recon_scatter(fnn, recon, primary, xy, val_idx, output_path, formats=formats)
+    base, ext = os.path.splitext(output_path)
+    _render_recon_conditional(
+        fnn, recon, primary, xy, val_idx,
+        base.replace("target_vs_pred", "conditional") + ext, formats=formats)
+
+
+def plot_recon_on_kernel(*, recon=None, primary=None, xy=None, val_idx=None,
+                         output_path=None,
+                         recon_folder=RECON_DEEPSETS_FOLDER,
+                         formats=("png",)):
+    """Render recon_target_vs_pred_kernel.png / recon_conditional_kernel.png:
+    recon scored on the REAL Step-1 kernel labels instead of the surrogate's
+    prediction. No `fnn` argument at all -- unlike `plot_recon_only`, this
+    never touches the surrogate, by design (see `_recon_target_pred_kernel`).
+    Same val split as `plot_recon_only` (species-aware `shower_level_val_idx`),
+    so the two are directly comparable panel-for-panel: any gap between them
+    is FNN-induced error, not a different evaluation set."""
+    if primary is None or xy is None:
+        primary, xy, _E, _T, strat_ids_disk = _load_corpus()
+    else:
+        strat_ids_disk = None
+    if val_idx is None:
+        if strat_ids_disk is None:
+            strat_ids_disk = torch.load(
+                os.path.join(TRAINING_DATASET_FOLDER, "strategy_ids.pt")
+            ).long()
+        species_ids_disk = torch.load(
+            os.path.join(TRAINING_DATASET_FOLDER, "species_ids.pt")
+        ).long()
+        val_idx = shower_level_val_idx(strat_ids_disk, VAL_FRAC, RECON_VAL_SEED,
+                                       species_ids=species_ids_disk)
+    if recon is None:
+        recon = load_recon(recon_folder)
+    if output_path is None:
+        os.makedirs(recon_folder, exist_ok=True)
+        output_path = os.path.join(recon_folder, "recon_target_vs_pred_kernel.png")
+
+    target, pred, N = _recon_target_pred_kernel(recon, primary, xy, val_idx)
+    _draw_recon_scatter(target, pred, N, output_path, formats=formats,
+                        title_suffix=" [kernel input]")
+    base, ext = os.path.splitext(output_path)
+    _draw_recon_conditional(
+        target, pred, N, base.replace("target_vs_pred", "conditional") + ext,
+        formats=formats, title_suffix=" [kernel input]")
+
+
+# Per-species hexbin colour (count) limits for the dual FNN scatters:
+# (vmin_E, vmax_E, vmin_T, vmax_T). Muon signals are denser than electron.
+FNN_DUAL_VLIM = {
+    "electron": dict(vmin_E=0, vmax_E=2000, vmin_T=0, vmax_T=2000),
+    "muon":     dict(vmin_E=0, vmax_E=3000, vmin_T=0, vmax_T=1000),
+}
+# A species with no pinned entry falls back to _render_fnn_scatter's own
+# autoscaled defaults rather than borrowing another species' scale -- the count
+# densities differ by about an order of magnitude between components.
+FNN_DUAL_VLIM_DEFAULT: dict = {}
+
+
+def plot_fnn_dual(output_dir=None):
+    """Per-species FNN scatter for the dual-species surrogate. Each species'
+    DeepSets model is evaluated against its OWN species subset (split on the
+    Step-1 species_ids sidecar, the corpus E/T being per-species), reproducing
+    02_train_fnn_deepsets.py's split. Writes
+    FNN_FOLDER/fnn_<species>_target_vs_pred.png per species. Per-species colour
+    scales come from FNN_DUAL_VLIM."""
+    primary, xy, E_true, T_true, strat_ids = _load_corpus()
+    species_ids = torch.load(
+        os.path.join(TRAINING_DATASET_FOLDER, "species_ids.pt")).long()
+    if output_dir is None:
+        output_dir = FNN_FOLDER
+    os.makedirs(output_dir, exist_ok=True)
+
+    for tag, species_val in SPECIES_TAGS:
+        idx = torch.nonzero(species_ids == species_val).squeeze(-1)
+        if idx.numel() == 0:
+            print(f"[skip] no {tag} rows (species id {species_val}) in corpus")
+            continue
+        fnn = load_species_fnn(tag)
+        # val_idx is positional within the filtered subset; pass the subset
+        # tensors so _render_fnn_scatter indexes them consistently.
+        val_idx = shower_level_val_idx(strat_ids[idx], VAL_FRAC, FNN_VAL_SEED)
+        out = os.path.join(output_dir, f"fnn_{tag}_target_vs_pred.png")
+        _render_fnn_scatter(fnn, primary[idx], xy[idx],
+                            E_true[idx], T_true[idx], val_idx, out,
+                            **FNN_DUAL_VLIM.get(tag, FNN_DUAL_VLIM_DEFAULT))
+        _render_fnn_conditional(
+            fnn, primary[idx], xy[idx], E_true[idx], T_true[idx], val_idx,
+            os.path.join(output_dir, f"fnn_{tag}_conditional.png"))
+
+
+def plot_recon_dual(output_path=None, recon_folder=RECON_DEEPSETS_FOLDER, formats=("png",)):
+    """Recon scatter for the dual-species surrogate. The combined
+    DualSpeciesSurrogate (fnn_electron.pt + fnn_muon.pt) feeds the recon on the
+    FULL corpus — identical to 03_train_recon.py. recon.pt itself is a single
+    (non-per-species) net, so load_recon() is reused unchanged."""
+    from modules.surrogates import load_dual_surrogate
+    dual = load_dual_surrogate(FNN_FOLDER, DEVICE)
+    plot_recon_only(fnn=dual, output_path=output_path,
+                    recon_folder=recon_folder, formats=formats)
+
+
+def main():
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dual", action="store_true",
+                    help="dual-species surrogate: per-species FNN scatters + "
+                         "combined-surrogate recon scatter")
+    ap.add_argument("--kernel-only", action="store_true",
+                    help="render only the recon-on-kernel pair "
+                         "(recon_target_vs_pred_kernel.png / "
+                         "recon_conditional_kernel.png) and skip every "
+                         "surrogate-dependent figure -- for back-filling a run "
+                         "whose Step 3 wrote only the surrogate-fed scatter")
+    args = ap.parse_args()
+
+    print("=" * 72)
+    print("v6/plots/training/02_nn_target_vs_pred.py" + ("  [dual]" if args.dual else ""))
+    print("=" * 72)
+    if not args.kernel_only:
+        if args.dual:
+            plot_fnn_dual()
+            plot_recon_dual()
+        else:
+            plot_fnn_only()
+            plot_recon_only()
+    # Recon-on-kernel needs no surrogate at all, so it runs the same way
+    # regardless of --dual -- and is the only thing --kernel-only renders.
+    plot_recon_on_kernel()
+
+
+if __name__ == "__main__":
+    main()
