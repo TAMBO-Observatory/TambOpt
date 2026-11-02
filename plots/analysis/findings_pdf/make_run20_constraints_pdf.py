@@ -332,6 +332,13 @@ pages.append(page([F + "utility_curves_kernel_snapshots.png"], [
     "pads: kernel New U falls steadily (0.829 -> 0.787) as the pads form, the price of the construction preference",
     "contour rows: flat for ~300 steps, then -0.005: the terraces cost < 1% also along the path",
 ]))
+pages.append(page([F + "utility_curves_same_u.png"], [
+    "Same snapshots scored with the optimised formula (5° reward x smooth Poisson trigger on expected counts, - penalty,",
+    "     the run's own scoring set): surrogate (reproduces the run's log exactly) and kernel as the response",
+    "With this formula the kernel follows the surrogate: all E +0.12, E 5.00-5.67 +0.21, pads +0.78, contour +0.62",
+    "The gains are small (all E: 0.4% of U) - below the ±0.5% scatter of the held-out drawn-count New U above,",
+    "     which is why the previous slide shows no trend; pads / contour gains here are mostly the penalty paid off",
+]))
 pages.append(page([F + "utility_curves_lhs.png"], [
     "Five Latin-hypercube starts per configuration: the five curves reach the same level within ~200 steps",
     "     (e.g. 5° all E: 25.8-26.1 at the start, 26.1-26.2 from step 200 on); access is still rising at step 1,000",

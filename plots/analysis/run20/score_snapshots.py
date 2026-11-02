@@ -28,6 +28,7 @@ D = os.path.join(C.RUN_LOCATION, "diagnostics", "snaps")
 RUNS = [("eall", "all E"), ("e500_567", "E 5.00–5.67"), ("pads", "+ pads"), ("contour", "+ contour rows")]
 ap = argparse.ArgumentParser()
 ap.add_argument("--write", action="store_true")
+ap.add_argument("--same-u", action="store_true", help="plot same_u_<name>.json (the optimised formula on the kernel)")
 args = ap.parse_args()
 os.makedirs(D, exist_ok=True)
 
@@ -43,6 +44,29 @@ if args.write:
     print("[write]", os.path.join(D, "layouts.txt"), len(lines), "snapshots")
     sys.exit(0)
 
+ap2 = sys.argv[1:]
+if "--same-u" in ap2:       # the optimised formula on the kernel (scripts/diagnostics/r20_score_snaps_same_u.py)
+    fig, axs = plt.subplots(1, len(RUNS), figsize=(5.2 * len(RUNS), 4.6), constrained_layout=True)
+    for ax, (k, name) in zip(axs, RUNS):
+        r = {int(s_): v for s_, v in json.load(open(os.path.join(D, f"same_u_{k}.json"))).items()}
+        st = sorted(r)
+        ax.plot(st, [r[s_]["kernel"] for s_ in st], color="#e07b39", marker="o", lw=1.8, label="kernel")
+        ax.plot(st, [r[s_]["surrogate"] for s_ in st], color="#2a6fb0", marker="o", lw=1.8, label="surrogate")
+        ax.axhline(r[0]["kernel"], color="#e07b39", lw=0.7, ls=":")
+        ax.axhline(r[0]["surrogate"], color="#2a6fb0", lw=0.7, ls=":")
+        ax.set_title(f"{name}: kernel {r[st[-1]]['kernel'] - r[0]['kernel']:+.2f}, "
+                     f"surrogate {r[st[-1]]['surrogate'] - r[0]['surrogate']:+.2f} (step 1,000 − 0)", fontsize=10)
+        ax.set_xlabel("SGD step")
+        ax.grid(alpha=0.25, lw=0.5)
+    axs[0].set_ylabel("U as optimised (30 × 5° utility − penalty)")
+    axs[0].legend(fontsize=8, frameon=False)
+    fig.suptitle("Snapshots every 100 steps scored with the optimised objective (5° reward × Poisson trigger on "
+                 "expected counts, − penalty, run's own scoring set): surrogate vs kernel response; dotted = start",
+                 fontsize=11)
+    out = os.path.join(C.RUN_LOCATION, "diagnostics", "r20b", "utility_curves_same_u.png")
+    fig.savefig(out, dpi=150, facecolor="white")
+    print("[write]", out)
+    sys.exit(0)
 S = json.load(open(os.path.join(D, "scores.json")))["scores"]
 fig, axs = plt.subplots(1, len(RUNS), figsize=(5.2 * len(RUNS), 4.6), constrained_layout=True)
 for ax, (k, name) in zip(axs, RUNS):
