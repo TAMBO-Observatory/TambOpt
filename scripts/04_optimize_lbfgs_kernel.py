@@ -437,12 +437,14 @@ def run_main_pool(args, mountain, surface, recon, out_dir, resp=None):
         best_u, best_x, best_y = st["best_u"], st["best_x"], st["best_y"]
         plat = st.get("plateau", plat)
         sgd_ref = st.get("sgd_ref")
+        snaps = st.get("snaps", {})
         print(f"[resume] {state_path} at epoch {start}, best scoring-set U={best_u:+.3f}"
               + (f", lr {plat['lr']:.3g}" if args.plateau_every > 0 else ""))
     else:
         best_u = score()
         best_x, best_y = e_init.detach().cpu().clone(), n_init.detach().cpu().clone()
         score_log.append(dict(epoch=0, U_score=best_u))
+        snaps = {0: (best_x.clone(), best_y.clone())} if args.snap_every > 0 else {}
         print(f"[score] init U={best_u:+.3f} on the scoring set")
 
     def offset(epoch, sub=0):
@@ -527,6 +529,8 @@ def run_main_pool(args, mountain, surface, recon, out_dir, resp=None):
             xy_module.x.data.copy_(e_new.to(DEVICE).to(xy_module.x.dtype))
             xy_module.y.data.copy_(n_new.to(DEVICE).to(xy_module.y.dtype))
         log.append(dict(epoch=epoch + 1, **tot))
+        if args.snap_every > 0 and (epoch + 1) % args.snap_every == 0:      # --snap-every: layout snapshots
+            snaps[epoch + 1] = (xy_module.x.detach().cpu().clone(), xy_module.y.detach().cpu().clone())
 
         if (epoch + 1) % args.score_every == 0 or epoch == args.epochs - 1:
             s = score()
@@ -565,7 +569,8 @@ def run_main_pool(args, mountain, surface, recon, out_dir, resp=None):
             os.makedirs(out_dir, exist_ok=True)
             torch.save(dict(xy=xy_module.state_dict(), optimizer=optimizer.state_dict(),
                             epoch=epoch + 1, log=log, score_log=score_log, best_u=best_u,
-                            best_x=best_x, best_y=best_y, plateau=plat, sgd_ref=sgd_ref), state_path + ".tmp")
+                            best_x=best_x, best_y=best_y, plateau=plat, sgd_ref=sgd_ref, snaps=snaps),
+                       state_path + ".tmp")
             os.replace(state_path + ".tmp", state_path)
         if plat["stop"]:
             break
@@ -745,6 +750,8 @@ def main():
     ap.add_argument("--score-every", type=int, default=250)
     ap.add_argument("--score-chunk", type=int, default=32)
     ap.add_argument("--log-every", type=int, default=5)
+    ap.add_argument("--snap-every", type=int, default=0,
+                    help="> 0: keep the layout every N steps (and at step 0) in opt_state.pt['snaps'] {step: (x, y)}")
     ap.add_argument("--ckpt-every", type=int, default=250,
                     help="save optimizer state every N steps; a rerun with the same --out-suffix resumes")
     ap.add_argument("--recon-folder", default=RECON_FOLDER + "_deepsets")
